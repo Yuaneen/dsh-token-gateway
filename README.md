@@ -254,7 +254,7 @@ POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 ## 计价与归属
 
 - DSH 的 `TokenUsage` 四个桶是**互斥**的：`inputTokens`（未缓存输入）、`cacheReadTokens`、`cacheWriteTokens`、`outputTokens`。每个桶只计一次价。
-- 内置价格表是 USD / 1M tokens 的**峰时快照**，口径对齐 `dsh-budget`（2026-11）；谷时乘以 `offPeakMultiplier`（默认 `0.5`）。上生产前请对照官方价目页，用 `pricing.prices` 覆盖。
+- 内置价格表是 USD / 1M tokens 的**峰时快照**，口径为 2026-11 峰时价目；谷时乘以 `offPeakMultiplier`（默认 `0.5`）。上生产前请对照官方价目页，用 `pricing.prices` 覆盖。
 - 内置表覆盖 `deepseek-chat`、`deepseek-reasoner`、`deepseek-flash`、`deepseek-v4-flash*`、`deepseek-v4-pro`。其余模型走 `defaultPrice`；默认 `priced: false`，计 0 并在日志里告警一次。
 - 归属精度：
   - `llm/stream` 的 `usage` 是权威来源
@@ -270,19 +270,6 @@ POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 - 写入防抖 `persistence.flushMs`，插件 dispose 时强制 flush
 - 启动时 `restore()` 逐桶校验，损坏的桶忽略，不阻塞启动
 - 未启用持久化时退化为纯内存（重启归零）
-
----
-
-## 和现有插件的关系
-
-| 插件 | 它强在哪 | 本项目的差异 |
-|---|---|---|
-| [`dsh-budget`](https://www.npmjs.com/package/dsh-budget) | 成熟的 alert/block/degrade + 碳排/延迟/设置页 | 已冻结；本项目把「网关准入 + 指令控制面 + HTTP 控制面」作为核心，不绑定客户端 UI |
-| [`dsh-cost-meter`](https://www.npmjs.com/package/dsh-cost-meter) | 展示最全、更新最勤、订阅额度 | 以展示/提醒为主，不硬拦；本项目默认 `block` |
-| [`dsh-router-core`](https://www.npmjs.com/package/dsh-router-core) | 真正的 OpenAI/Anthropic/Gemini 四协议网关 | 有路由与账号池，但没有预算/费用；本项目是治理面，v0.3 再补对外入口 |
-| [`dsh-usage-guard`](https://www.npmjs.com/package/dsh-usage-guard) | 日 token/费用上限 + 出网前拦截 | 仅日维度；本项目三作用域 + 降级 + 归属 |
-
-换句话说：**v0.1 先把“谁能花、花到哪、超了怎么办”做对；v0.3 再把“外部请求怎么进来”接上。**
 
 ---
 
