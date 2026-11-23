@@ -1,12 +1,13 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="dsh-ai-gateway-budget — AI Gateway and budget governance for DeepSeek Harness" width="100%">
+  <img src="docs/banner.svg" alt="dsh-token-gateway — AI Gateway and budget governance for DeepSeek Harness" width="100%">
 </p>
 
-<h1 align="center">dsh-ai-gateway-budget</h1>
+<h1 align="center">dsh-token-gateway</h1>
 
 <p align="center">
   <strong>把 DSH 的每一次模型调用，收口到一个预算网关。</strong><br>
-  <sub>One admission gate · three budget scopes · cost attribution · alert / block / degrade</sub>
+  <sub>One admission gate · three budget scopes · cost attribution · alert / block / degrade</sub><br>
+  <sub>npm package: <code>dsh-ai-gateway-budget</code> · repo: <code>dsh-token-gateway</code></sub>
 </p>
 
 <p align="center">
@@ -107,7 +108,7 @@ onLlmStream(options, next)
 
 ```bash
 # 从 GitHub 安装（bundle patch 自动插入 profile）
-dsh plugin --profile web add github:Yuaneen/dsh-ai-gateway
+dsh plugin --profile web add github:Yuaneen/dsh-token-gateway
 
 # 重启 dsh web 后，在会话里：
 /gateway
@@ -116,8 +117,8 @@ dsh plugin --profile web add github:Yuaneen/dsh-ai-gateway
 本地开发：
 
 ```bash
-git clone https://github.com/Yuaneen/dsh-ai-gateway.git
-cd dsh-ai-gateway
+git clone https://github.com/Yuaneen/dsh-token-gateway.git
+cd dsh-token-gateway
 dsh plugin --profile web add .
 ```
 

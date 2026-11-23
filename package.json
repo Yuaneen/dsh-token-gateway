@@ -17,11 +17,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Yuaneen/dsh-ai-gateway.git"
+    "url": "git+https://github.com/Yuaneen/dsh-token-gateway.git"
   },
-  "homepage": "https://github.com/Yuaneen/dsh-ai-gateway#readme",
+  "homepage": "https://github.com/Yuaneen/dsh-token-gateway#readme",
   "bugs": {
-    "url": "https://github.com/Yuaneen/dsh-ai-gateway/issues"
+    "url": "https://github.com/Yuaneen/dsh-token-gateway/issues"
   },
   "dsh": {
     "manifestVersion": 1,
