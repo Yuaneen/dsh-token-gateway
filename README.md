@@ -14,7 +14,6 @@
   <a href="test/"><img src="https://img.shields.io/badge/tests-39%20passing-22c55e?style=flat-square" alt="39 tests passing"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A522.19-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node >= 22.19"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/DSH-0.2.2--rc.1-4f6bed?style=flat-square" alt="DSH 0.2.2-rc.1"></a>
-  <a href="#路线图"><img src="https://img.shields.io/badge/status-MVP-f59e0b?style=flat-square" alt="Status: MVP"></a>
   <a href="#贡献"><img src="https://img.shields.io/badge/PRs-welcome-ec4899?style=flat-square" alt="PRs welcome"></a>
 </p>
 
@@ -23,15 +22,13 @@
   <a href="#快速开始">快速开始</a> ·
   <a href="#预算策略">预算策略</a> ·
   <a href="#配置">配置</a> ·
-  <a href="#控制面">控制面</a> ·
-  <a href="#路线图">路线图</a> ·
-  <a href="#已知限制">已知限制</a>
+  <a href="#控制面">控制面</a>
 </p>
 
 ---
 
 > [!NOTE]
-> **v0.1 MVP，可运行、可测试、可扩展。** 39 个测试全部通过，并已在隔离的 DSH `0.2.2-rc.1` web profile 中实际启动：`GET /token-gateway/v1/status` 返回 `200`。客户端 UI 与对外 OpenAI 兼容入口在[路线图](#路线图)里。
+> **v0.1 MVP，可运行、可测试、可扩展。** 39 个测试全部通过，并已在隔离的 DSH `0.2.2-rc.1` web profile 中实际启动：`GET /token-gateway/v1/status` 返回 `200`。
 
 DSH 的所有模型调用——主循环、子代理、会话标题、压缩摘要——都会经过 `llm/stream`。这个插件在那个接缝上放了一道闸门：**先算预算，再放行；放行后按 usage 记账；超了按策略预警、拦截或降级。**
 
@@ -69,7 +66,7 @@ flowchart LR
     L --> API["/gateway<br/>HTTP API"]
 ```
 
-所以这里的「网关」是 **DSH 模型调用的统一准入层**，而不是另起一个 LiteLLM 式的独立代理进程。对外 OpenAI 兼容入口放在 v0.3，它复用同一套预算与账本。
+所以这里的「网关」是 **DSH 模型调用的统一准入层**，而不是另起一个 LiteLLM 式的独立代理进程。对外 OpenAI 兼容入口尚未实现，将来会复用同一套预算与账本。
 
 为什么不用 `agent/request`：该接缝已标记 deprecated，且明确要求不能改 provider/model（只能改 controls）。`llm/stream` 才是覆盖全部调用、且能在 `next()` 之前拦截的地方。
 
@@ -125,7 +122,7 @@ degradation:
   deepseek-v4-pro: deepseek-v4-flash
 ```
 
-跨 provider 的上下文窗口、工具 schema、视觉能力都可能不同，MVP 不做。
+跨 provider 的上下文窗口、工具 schema、视觉能力都可能不同，本版不做。
 
 ---
 
@@ -242,44 +239,6 @@ POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 - 写入防抖 `persistence.flushMs`，插件 dispose 时强制 flush
 - 启动时 `restore()` 逐桶校验，损坏的桶忽略，不阻塞启动
 - 未启用持久化时退化为纯内存（重启归零）
-
----
-
-## 路线图
-
-### v0.2 — 可日常使用
-
-- [ ] 客户端状态胶囊 + 设置页（沿用官方 `slots` / settings 接缝）
-- [ ] 按 provider 的预算上限
-- [ ] 用 `storage-domain` 替代手写 JSON
-- [ ] 审计事件（block / degrade / unblock）写入会话日志或独立账本
-
-### v0.3 — 对外 Token Gateway
-
-- [ ] `POST /v1/chat/completions`、`/v1/messages`（OpenAI / Anthropic 兼容）
-- [ ] API key → 租户 / 配额映射，流式翻译，tool calls
-- [ ] 复用同一 `Ledger` 与 `evaluateBudget`，按 key 加一层 `tenant` scope
-
-### v0.4 — 优化
-
-- [ ] 在 `agent/pre-step` 用 `agent.model.select()` 做按任务分级路由（而不是只在 `llm/stream` 里事后改模型）
-- [ ] 前缀缓存友好：稳定 system / tools 前缀，减少 cache miss
-- [ ] 峰谷调度：高峰只拦“可延后”的任务，谷时自动续跑
-
----
-
-## 已知限制
-
-> [!WARNING]
-> 这是 MVP，不是生产级计费系统。下面几条请在采用前逐条确认。
-
-1. **降级发生在请求头记录之后**：会话日志的 `request/header` 仍记录原模型，账本按实际下发的便宜模型计。两者可能不一致。缓解：只做同 family 映射，记录审计日志；v0.4 把路由前移到 `agent/pre-step`。
-2. **工具调用费用未计**：DeepSeek 的 web search / fetch、文件解析等按次计费，不在 `TokenUsage` 里。
-3. **`unblock` 是水位线，不是永久开关**：花费继续增长会重新拦截。
-4. **辅助调用归属**：没有 `sessionId` 的调用可能落到最近活跃会话，严格审计场景应改为 `__global__`。
-5. **HTTP 默认仅回环**：把 `dsh web` 暴露到 LAN 前务必设置 `gateway.token`。
-6. **价格表是快照**：内置数字仅作起点，生产前用官方价目覆盖。
-7. **进程内聚合 + JSON 持久化**：多进程 / 多实例部署时账本不共享；v0.3 的多租户入口需要外部存储。
 
 ---
 
