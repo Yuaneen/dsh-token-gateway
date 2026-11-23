@@ -1,12 +1,12 @@
-# dsh-ai-gateway-budget — one admission gate for every model call.
+# dsh-token-gateway — one admission gate for every model call.
 #
 # Installed as a profile bundle: `dsh plugin --profile web add .` (or the GitHub spec)
 # The row below is inserted into the profile's loader tree. Every key is
 # validated at load time by src/config.js; a bad value fails the mount instead
 # of silently disabling a budget.
 - insert:
-    - id: ai-gateway
-      name: dsh-ai-gateway-budget
+    - id: token-gateway
+      name: dsh-token-gateway
       config:
         # Budget caps in USD per scope. Omit a scope or set it to null for
         # unlimited. 0 is rejected: it is not a cap, it is a typo.
@@ -46,13 +46,13 @@
             offPeakMultiplier: 0.5
 
         gateway:
-          # Read-only control API at /ai-gateway/v1/status and /v1/usage.
+          # Read-only control API at /token-gateway/v1/status and /v1/usage.
           http: true
-          basePath: /ai-gateway
+          basePath: /token-gateway
           # Set a bearer token before exposing the web host beyond loopback.
           token: ''
 
         persistence:
           enabled: true
-          file: $DSH_HOME/ai-gateway/ledger.json
+          file: $DSH_HOME/token-gateway/ledger.json
           flushMs: 500

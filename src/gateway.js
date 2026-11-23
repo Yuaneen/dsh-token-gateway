@@ -140,13 +140,13 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
     if (decision.action === 'block') {
       log.warn(`blocked ${options.provider}/${options.model}: ${decision.reason}`);
       return blockedStream(
-        `AI Gateway blocked this request: ${decision.reason}. Lift it with "/gateway unblock ${decision.scope}".`,
+        `Token Gateway blocked this request: ${decision.reason}. Lift it with "/gateway unblock ${decision.scope}".`,
       );
     }
 
     if (decision.action === 'degrade' && decision.targetModel) {
       if (llm === undefined || typeof llm.stream !== 'function') {
-        return blockedStream(`AI Gateway: degrade requested but no LLM service is available (${decision.reason}).`);
+        return blockedStream(`Token Gateway: degrade requested but no LLM service is available (${decision.reason}).`);
       }
       const copy = { ...options, model: decision.targetModel };
       rewritten.add(copy);
@@ -295,12 +295,12 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
       persist?.markDirty();
       return {
         kind: 'success',
-        text: `AI Gateway: lifted the ${scope} block at ${formatMoney(spent, config.currency)}. It re-blocks after further spending.`,
+        text: `Token Gateway: lifted the ${scope} block at ${formatMoney(spent, config.currency)}. It re-blocks after further spending.`,
       };
     }
 
     if (sub === 'help') {
-      return { kind: 'success', text: 'AI Gateway commands: /gateway [status] | usage | unblock <session|daily|monthly> | help' };
+      return { kind: 'success', text: 'Token Gateway commands: /gateway [status] | usage | unblock <session|daily|monthly> | help' };
     }
 
     return { kind: 'error', text: `unknown subcommand "${sub}". Try /gateway help.` };
@@ -320,7 +320,7 @@ function line(label, scope, snapshot) {
 /** Human-readable `/gateway` status. */
 export function formatStatus(snapshot) {
   return [
-    `AI Gateway · policy ${snapshot.overLimit} · action ${snapshot.action}`,
+    `Token Gateway · policy ${snapshot.overLimit} · action ${snapshot.action}`,
     line('session', 'session', snapshot),
     line('today', 'daily', snapshot),
     line('month', 'monthly', snapshot),
@@ -335,7 +335,7 @@ export function formatUsage(snapshot) {
       entry.tokens,
     ).padStart(7)} tok  ${String(entry.calls).padStart(4)} calls`;
   });
-  const header = `AI Gateway usage · session ${formatMoney(snapshot.totals.session, snapshot.currency)} · today ${formatMoney(
+  const header = `Token Gateway usage · session ${formatMoney(snapshot.totals.session, snapshot.currency)} · today ${formatMoney(
     snapshot.totals.daily,
     snapshot.currency,
   )} · month ${formatMoney(snapshot.totals.monthly, snapshot.currency)}`;

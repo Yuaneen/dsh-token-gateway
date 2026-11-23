@@ -77,7 +77,7 @@ test('apply wires llm/stream, commands and the control API', async () => {
 
   assert.equal(host.routes.length, 1);
   assert.equal(host.routes[0].kind, 'prefix');
-  assert.equal(host.routes[0].path, '/ai-gateway');
+  assert.equal(host.routes[0].path, '/token-gateway');
 });
 
 test('the /gateway command reports status and can unblock', async () => {
@@ -88,7 +88,7 @@ test('the /gateway command reports status and can unblock', async () => {
   const invocation = { rawInput: '', agent: { session: { id: 's1' } } };
   const status = await command.handler(invocation);
   assert.equal(status.kind, 'success');
-  assert.match(status.text, /AI Gateway/);
+  assert.match(status.text, /Token Gateway/);
 
   const unblock = await command.handler({ rawInput: 'unblock session', agent: { session: { id: 's1' } } });
   assert.equal(unblock.kind, 'success');
@@ -104,7 +104,7 @@ test('HTTP status is loopback-readable and JSON-shaped', async () => {
 
   const route = host.routes[0];
   const res = mockResponse();
-  await route.handler(mockRequest({ url: '/ai-gateway/v1/status', headers: { host: '127.0.0.1:3080' } }), res);
+  await route.handler(mockRequest({ url: '/token-gateway/v1/status', headers: { host: '127.0.0.1:3080' } }), res);
 
   assert.equal(res.out.status, 200);
   const body = JSON.parse(res.out.body);
@@ -119,12 +119,12 @@ test('a configured token is required for every control request', async () => {
 
   const route = host.routes[0];
   const denied = mockResponse();
-  await route.handler(mockRequest({ url: '/ai-gateway/v1/status' }), denied);
+  await route.handler(mockRequest({ url: '/token-gateway/v1/status' }), denied);
   assert.equal(denied.out.status, 401);
 
   const allowed = mockResponse();
   await route.handler(
-    mockRequest({ url: '/ai-gateway/v1/status', headers: { authorization: 'Bearer s3cret' } }),
+    mockRequest({ url: '/token-gateway/v1/status', headers: { authorization: 'Bearer s3cret' } }),
     allowed,
   );
   assert.equal(allowed.out.status, 200);
@@ -139,7 +139,7 @@ test('the control API can lift a block over HTTP', async () => {
   await route.handler(
     {
       method: 'POST',
-      url: '/ai-gateway/v1/unblock',
+      url: '/token-gateway/v1/unblock',
       headers: { 'content-type': 'application/json' },
       socket: { remoteAddress: '127.0.0.1' },
       async *[Symbol.asyncIterator]() {

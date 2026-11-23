@@ -1,5 +1,5 @@
 /**
- * dsh-ai-gateway-budget — AI Gateway + budget governance for DeepSeek Harness.
+ * dsh-token-gateway — Token Gateway + budget governance for DeepSeek Harness.
  *
  * Wires the pure gateway core to the host:
  *   - `llm/stream` waterfall  -> admission + metering for every model call
@@ -16,7 +16,7 @@ import { createGateway } from './gateway.js';
 import { Ledger } from './ledger.js';
 import { createStore } from './store.js';
 
-export const name = 'ai-gateway';
+export const name = 'token-gateway';
 
 /** The gateway is meaningless without the LLM seam. */
 export const inject = ['llm'];
@@ -26,11 +26,11 @@ function registerCommand(scope, runtime, gateway) {
     () =>
       runtime.register({
         name: 'gateway',
-        description: 'AI Gateway: spend, budgets, and block/unblock controls',
+        description: 'Token Gateway: spend, budgets, and block/unblock controls',
         input: { hint: 'status | usage | unblock <session|daily|monthly>' },
         handler: (invocation) => gateway.handleCommand(invocation),
       }),
-    'ai-gateway: /gateway command',
+    'token-gateway: /gateway command',
   );
 }
 
@@ -42,13 +42,13 @@ function registerRoute(scope, server, gateway, config) {
         path: config.gateway.basePath,
         handler: (req, res) => gateway.handleHttp(req, res),
       }),
-    'ai-gateway: control API',
+    'token-gateway: control API',
   );
 }
 
 export async function apply(ctx, input) {
   const config = resolveConfig(input);
-  const logger = ctx.logger('ai-gateway');
+  const logger = ctx.logger('token-gateway');
   const ledger = new Ledger({ timeZone: config.pricing.peak.timeZone });
 
   const store = config.persistence.enabled
@@ -97,7 +97,7 @@ export async function apply(ctx, input) {
   }
 
   if (store !== null) {
-    ctx.effect(() => () => store.dispose(), 'ai-gateway: persistence');
+    ctx.effect(() => () => store.dispose(), 'token-gateway: persistence');
   }
 
   logger.info(

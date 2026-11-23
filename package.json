@@ -1,7 +1,7 @@
 {
-  "name": "dsh-ai-gateway-budget",
+  "name": "dsh-token-gateway",
   "version": "0.1.0",
-  "description": "AI Gateway + budget governance for DeepSeek Harness: one admission gate for every model call, session/day/month cost caps, alert/block/degrade policies, cost attribution, and a /gateway control surface",
+  "description": "Token Gateway + budget governance for DeepSeek Harness: one admission gate for every model call, session/day/month cost caps, alert/block/degrade policies, cost attribution, and a /gateway control surface",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -41,11 +41,13 @@
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "ai-gateway",
+    "token-gateway",
     "budget",
     "cost",
     "token",
-    "governance"
+    "governance",
+    "ai-gateway",
+    "token-budget"
   ],
   "license": "MIT"
 }

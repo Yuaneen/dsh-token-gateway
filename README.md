@@ -1,13 +1,12 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="dsh-token-gateway — AI Gateway and budget governance for DeepSeek Harness" width="100%">
+  <img src="docs/banner.svg" alt="dsh-token-gateway — Token Gateway and budget governance for DeepSeek Harness" width="100%">
 </p>
 
 <h1 align="center">dsh-token-gateway</h1>
 
 <p align="center">
   <strong>把 DSH 的每一次模型调用，收口到一个预算网关。</strong><br>
-  <sub>One admission gate · three budget scopes · cost attribution · alert / block / degrade</sub><br>
-  <sub>npm package: <code>dsh-ai-gateway-budget</code> · repo: <code>dsh-token-gateway</code></sub>
+  <sub>One admission gate · three budget scopes · cost attribution · alert / block / degrade</sub>
 </p>
 
 <p align="center">
@@ -32,14 +31,14 @@
 ---
 
 > [!NOTE]
-> **v0.1 MVP，可运行、可测试、可扩展。** 39 个测试全部通过，并已在隔离的 DSH `0.2.2-rc.1` web profile 中实际启动：`GET /ai-gateway/v1/status` 返回 `200`。客户端 UI 与对外 OpenAI 兼容入口在[路线图](#路线图)里。
+> **v0.1 MVP，可运行、可测试、可扩展。** 39 个测试全部通过，并已在隔离的 DSH `0.2.2-rc.1` web profile 中实际启动：`GET /token-gateway/v1/status` 返回 `200`。客户端 UI 与对外 OpenAI 兼容入口在[路线图](#路线图)里。
 
 DSH 的所有模型调用——主循环、子代理、会话标题、压缩摘要——都会经过 `llm/stream`。这个插件在那个接缝上放了一道闸门：**先算预算，再放行；放行后按 usage 记账；超了按策略预警、拦截或降级。**
 
 - **零运行时依赖**，无 TypeScript 构建，改完即可加载
 - **三档预算**：会话 / 当日 / 当月，USD 记账，按配置币种展示
 - **可审计**：按模型、会话、日、月归属花费
-- **有控制面**：`/gateway` 命令 + `/ai-gateway/v1/*` HTTP API
+- **有控制面**：`/gateway` 命令 + `/token-gateway/v1/*` HTTP API
 
 ---
 
@@ -127,7 +126,7 @@ dsh plugin --profile web add .
 验证控制面：
 
 ```bash
-curl -s http://127.0.0.1:3080/ai-gateway/v1/status | jq .data.action
+curl -s http://127.0.0.1:3080/token-gateway/v1/status | jq .data.action
 # "allow"
 ```
 
@@ -175,15 +174,15 @@ degradation:
 | `pricing.peak.holidays` | `[]` | `YYYY-MM-DD`，全天谷价 |
 | `gateway.http` | `true` | 是否注册控制面 |
 | `gateway.token` | `''` | 空 = 仅回环；非空 = 所有请求需 Bearer |
-| `persistence.file` | `$DSH_HOME/ai-gateway/ledger.json` | 支持 `~` / `$DSH_HOME` |
+| `persistence.file` | `$DSH_HOME/token-gateway/ledger.json` | 支持 `~` / `$DSH_HOME` |
 
 <details>
 <summary><strong>完整配置示例</strong>（点击展开）</summary>
 
 ```yaml
 - insert:
-    - id: ai-gateway
-      name: dsh-ai-gateway-budget
+    - id: token-gateway
+      name: dsh-token-gateway
       config:
         budgets:
           session: 2      # USD；null/省略 = 不限
@@ -203,11 +202,11 @@ degradation:
             offPeakMultiplier: 0.5
         gateway:
           http: true
-          basePath: /ai-gateway
+          basePath: /token-gateway
           token: ''       # 非空时所有控制面请求需 Bearer
         persistence:
           enabled: true
-          file: $DSH_HOME/ai-gateway/ledger.json
+          file: $DSH_HOME/token-gateway/ledger.json
           flushMs: 500
 ```
 
@@ -228,7 +227,7 @@ degradation:
 
 ### HTTP API
 
-挂载在 `gateway.basePath`（默认 `/ai-gateway`），只注册一个 prefix 路由：
+挂载在 `gateway.basePath`（默认 `/token-gateway`），只注册一个 prefix 路由：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -245,9 +244,9 @@ degradation:
 实测（隔离 profile，`--port 0`）：
 
 ```text
-GET  /ai-gateway/v1/status  -> 200 {"ok":true,...}
-GET  /ai-gateway/v1/usage   -> 200 {"ok":true,"data":{"models":[]...}}
-POST /ai-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
+GET  /token-gateway/v1/status  -> 200 {"ok":true,...}
+GET  /token-gateway/v1/usage   -> 200 {"ok":true,"data":{"models":[]...}}
+POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 ```
 
 ---
@@ -296,7 +295,7 @@ POST /ai-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 - [ ] 用 `storage-domain` 替代手写 JSON
 - [ ] 审计事件（block / degrade / unblock）写入会话日志或独立账本
 
-### v0.3 — 对外 AI Gateway
+### v0.3 — 对外 Token Gateway
 
 - [ ] `POST /v1/chat/completions`、`/v1/messages`（OpenAI / Anthropic 兼容）
 - [ ] API key → 租户 / 配额映射，流式翻译，tool calls
