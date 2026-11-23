@@ -73,34 +73,6 @@ flowchart LR
 
 为什么不用 `agent/request`：该接缝已标记 deprecated，且明确要求不能改 provider/model（只能改 controls）。`llm/stream` 才是覆盖全部调用、且能在 `next()` 之前拦截的地方。
 
-### 一次调用的决策
-
-```text
-onLlmStream(options, next)
-  ├─ 已降级请求？ ── 是 ──▶ 只计量（防止再次准入造成循环）
-  ├─ sessionId = options.sessionId ?? lastSessionId ?? "__global__"
-  ├─ totals    = ledger.totals(sessionId, now)
-  ├─ decision  = evaluateBudget(totals, budgets, overrides, model)
-  │
-  ├─ block   ──▶ blockedStream(原因 + /gateway unblock 提示)
-  ├─ degrade ──▶ llm.stream({ ...options, model: 更便宜模型 })
-  │              └─ 重新进入 waterfall，命中 rewritten 守卫，只计量
-  ├─ warn    ──▶ 冷却窗口内记一条日志，然后正常放行
-  └─ allow   ──▶ next()
-                   └─ 第一个 usage chunk：
-                        price = priceForModel(route, now)
-                        cost  = costOf(usage, price)
-                        ledger.record(...)
-```
-
-三个工程细节：
-
-| 细节 | 做法 |
-|---|---|
-| **阻塞不抛错** | 返回正常的 assistant 文本流 + `finish { kind: 'error', failure.code: 'BUDGET_BLOCKED' }`，让 agent loop 正常结算，不触发传输重试 |
-| **降级不递归** | 被降级的请求对象放进 `WeakSet`，重新进入 waterfall 时跳过准入、只计量 |
-| **计量不编造** | provider 没回 `usage` 的失败调用不计费，不用字符数瞎估 |
-
 ---
 
 ## 快速开始
