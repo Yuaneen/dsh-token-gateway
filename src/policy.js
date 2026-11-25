@@ -13,49 +13,90 @@
 
 export const SCOPES = ['session', 'daily', 'monthly'];
 
+/** Budget dimensions. A cap exists per (scope, metric); the worst one decides. */
+export const METRICS = ['usd', 'tokens'];
+
 function ratioOf(spent, cap) {
   if (cap === null || cap === undefined) return null;
   if (cap <= 0) return Number.POSITIVE_INFINITY;
   return spent / cap;
 }
 
+/** Compact token count for human-facing reasons. */
+export function formatTokenCount(value) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+/**
+ * One candidate per (scope, metric) that actually has a cap.
+ * USD and tokens are separate dimensions: a call is admitted only when every
+ * capped dimension is satisfied, which is why the caller takes the maximum.
+ */
+function candidates({ totals, tokenTotals, budgets, tokenBudgets }) {
+  const out = [];
+  for (const scope of SCOPES) {
+    const cap = budgets?.[scope] ?? null;
+    if (cap !== null) {
+      const spent = totals?.[scope] ?? 0;
+      out.push({ scope, metric: 'usd', cap, spent, ratio: ratioOf(spent, cap) });
+    }
+    const tokenCap = tokenBudgets?.[scope] ?? null;
+    if (tokenCap !== null) {
+      const spent = tokenTotals?.[scope]?.totalTokens ?? 0;
+      out.push({ scope, metric: 'tokens', cap: tokenCap, spent, ratio: ratioOf(spent, tokenCap) });
+    }
+  }
+  return out;
+}
+
+function describe(entry) {
+  return entry.metric === 'tokens'
+    ? `${formatTokenCount(entry.spent)} / ${formatTokenCount(entry.cap)} tokens`
+    : `${entry.spent.toFixed(4)} / ${entry.cap} USD`;
+}
+
 /**
  * @param {object} input
  * @param {{session: number, daily: number, monthly: number}} input.totals spend in USD
- * @param {{session?: number|null, daily?: number|null, monthly?: number|null}} input.budgets
+ * @param {{session: object, daily: object, monthly: object}} [input.tokenTotals] per-scope token summaries
+ * @param {{session?: number|null, daily?: number|null, monthly?: number|null}} input.budgets USD caps
+ * @param {{session?: number|null, daily?: number|null, monthly?: number|null}} [input.tokenBudgets] token caps
  * @param {number} input.warnRatio
  * @param {'alert'|'block'|'degrade'} input.overLimit
  * @param {'warn'|'hard'} [input.degradeAt]
  * @param {Record<string, string>} [input.degradation]
  * @param {string} [input.model]
- * @param {Record<string, number>} [input.overrides] scope -> spend at unblock time
+ * @param {Record<string, number>} [input.overrides] scope -> USD at unblock time
+ * @param {Record<string, number>} [input.tokenOverrides] scope -> tokens at unblock time
  */
 export function evaluateBudget({
   totals,
+  tokenTotals,
   budgets,
+  tokenBudgets,
   warnRatio,
   overLimit,
   degradeAt = 'hard',
   degradation = {},
   model = '',
   overrides = {},
+  tokenOverrides = {},
 }) {
-  const entries = SCOPES.map((scope) => {
-    const cap = budgets[scope] ?? null;
-    const spent = totals[scope] ?? 0;
-    return { scope, cap, spent, ratio: ratioOf(spent, cap) };
-  }).filter((entry) => entry.ratio !== null);
+  const entries = candidates({ totals, tokenTotals, budgets, tokenBudgets });
 
   const target = degradation[model];
   const canDegrade = typeof target === 'string' && target.length > 0 && target !== model;
   const highest = entries.reduce((best, entry) => (best === null || entry.ratio > best.ratio ? entry : best), null);
 
   if (highest === null) {
-    return allow(entries, 'no budget caps configured');
+    return allow('no budget caps configured');
   }
 
   const overridden = (entry) => {
-    const watermark = overrides[entry.scope];
+    const watermarks = entry.metric === 'tokens' ? tokenOverrides : overrides;
+    const watermark = watermarks?.[entry.scope];
     return typeof watermark === 'number' && entry.spent <= watermark + 1e-9;
   };
 
@@ -64,32 +105,34 @@ export function evaluateBudget({
     .sort((a, b) => b.ratio - a.ratio)[0];
 
   if (over !== undefined) {
-    const reason = `${over.scope} budget exceeded (${over.spent.toFixed(4)} / ${over.cap} USD)`;
+    const reason = `${over.scope} ${over.metric === 'tokens' ? 'token budget' : 'budget'} exceeded (${describe(over)})`;
+    const base = { over: true, scope: over.scope, metric: over.metric, ratio: over.ratio, cap: over.cap, spent: over.spent };
     if (overLimit === 'alert') {
-      return { action: 'warn', over: true, scope: over.scope, ratio: over.ratio, cap: over.cap, spent: over.spent, targetModel: null, reason: `${reason}; alert only` };
+      return { action: 'warn', ...base, targetModel: null, reason: `${reason}; alert only` };
     }
     if (overLimit === 'degrade' && canDegrade) {
-      return { action: 'degrade', over: true, scope: over.scope, ratio: over.ratio, cap: over.cap, spent: over.spent, targetModel: target, reason: `${reason}; degrading ${model} -> ${target}` };
+      return { action: 'degrade', ...base, targetModel: target, reason: `${reason}; degrading ${model} -> ${target}` };
     }
-    return { action: 'block', over: true, scope: over.scope, ratio: over.ratio, cap: over.cap, spent: over.spent, targetModel: null, reason };
+    return { action: 'block', ...base, targetModel: null, reason };
   }
 
   if (highest.ratio >= warnRatio) {
+    const base = { over: false, scope: highest.scope, metric: highest.metric, ratio: highest.ratio, cap: highest.cap, spent: highest.spent };
     if (overLimit === 'degrade' && degradeAt === 'warn' && canDegrade) {
-      return { action: 'degrade', over: false, scope: highest.scope, ratio: highest.ratio, cap: highest.cap, spent: highest.spent, targetModel: target, reason: `${highest.scope} budget at ${Math.round(highest.ratio * 100)}%; degrading ${model} -> ${target}` };
+      return { action: 'degrade', ...base, targetModel: target, reason: `${highest.scope} budget at ${Math.round(highest.ratio * 100)}%; degrading ${model} -> ${target}` };
     }
-    return { action: 'warn', over: false, scope: highest.scope, ratio: highest.ratio, cap: highest.cap, spent: highest.spent, targetModel: null, reason: `${highest.scope} budget at ${Math.round(highest.ratio * 100)}%` };
+    return { action: 'warn', ...base, targetModel: null, reason: `${highest.scope} ${highest.metric === 'tokens' ? 'token ' : ''}budget at ${Math.round(highest.ratio * 100)}%` };
   }
 
-  return allow(entries, `highest ${highest.scope} budget at ${Math.round(highest.ratio * 100)}%`);
+  return allow(`highest ${highest.scope} ${highest.metric === 'tokens' ? 'token ' : ''}budget at ${Math.round(highest.ratio * 100)}%`, highest);
 }
 
-function allow(entries, reason) {
-  const highest = entries.reduce((best, entry) => (best === null || entry.ratio > best.ratio ? entry : best), null);
+function allow(reason, highest = null) {
   return {
     action: 'allow',
     over: false,
     scope: highest?.scope ?? null,
+    metric: highest?.metric ?? 'usd',
     ratio: highest?.ratio ?? 0,
     cap: highest?.cap ?? null,
     spent: highest?.spent ?? 0,
@@ -108,6 +151,24 @@ export function budgetRatios(totals, budgets) {
   for (const scope of SCOPES) {
     const cap = budgets[scope] ?? null;
     out[scope] = { spent: totals[scope] ?? 0, cap, ratio: ratioOf(totals[scope] ?? 0, cap) };
+  }
+  return out;
+}
+
+/**
+ * Token ratios for the status surfaces. Each entry also carries the full
+ * breakdown so the panel can render cached vs uncached vs output without a
+ * second request.
+ * @param {{session: object, daily: object, monthly: object}} tokenTotals
+ * @param {object} [tokenBudgets]
+ */
+export function tokenRatios(tokenTotals, tokenBudgets = {}) {
+  const out = {};
+  for (const scope of SCOPES) {
+    const summary = tokenTotals?.[scope] ?? { totalTokens: 0 };
+    const spent = summary.totalTokens ?? 0;
+    const cap = tokenBudgets?.[scope] ?? null;
+    out[scope] = { ...summary, cap, ratio: ratioOf(spent, cap) };
   }
   return out;
 }

@@ -11,7 +11,7 @@
  * separate concern (see store.js) so tests can exercise accounting directly.
  */
 
-import { dayKey, monthKey } from './pricing.js';
+import { dayKey, hourKey, monthKey } from './pricing.js';
 
 const ZERO = Object.freeze({
   spentUsd: 0,
@@ -21,6 +21,9 @@ const ZERO = Object.freeze({
   cacheWriteTokens: 0,
   calls: 0,
 });
+
+/** Hour buckets kept for the rolling series (8 days covers every day/week view). */
+const HOUR_RETENTION = 8 * 24;
 
 function emptyBucket() {
   return { ...ZERO };
@@ -39,6 +42,26 @@ function tokensOf(bucket) {
   return bucket.inputTokens + bucket.outputTokens + bucket.cacheReadTokens + bucket.cacheWriteTokens;
 }
 
+/**
+ * One bucket as the read side wants it: every token class kept separate, plus
+ * the derived totals the panel and the token budget both need.
+ * @param {object} [bucket]
+ */
+function summaryOf(bucket) {
+  if (bucket === undefined) {
+    return { spentUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, calls: 0 };
+  }
+  return {
+    spentUsd: bucket.spentUsd,
+    inputTokens: bucket.inputTokens,
+    outputTokens: bucket.outputTokens,
+    cacheReadTokens: bucket.cacheReadTokens,
+    cacheWriteTokens: bucket.cacheWriteTokens,
+    totalTokens: tokensOf(bucket),
+    calls: bucket.calls,
+  };
+}
+
 export class Ledger {
   /** @param {{timeZone?: string}} [options] */
   constructor({ timeZone = 'Asia/Shanghai' } = {}) {
@@ -49,10 +72,14 @@ export class Ledger {
     this.days = new Map();
     /** @type {Map<string, ReturnType<typeof emptyBucket>>} */
     this.months = new Map();
+    /** @type {Map<string, ReturnType<typeof emptyBucket>>} hour keys, for the series */
+    this.hours = new Map();
     /** @type {Map<string, ReturnType<typeof emptyBucket>>} */
     this.models = new Map();
     /** scope -> spend at the moment the user lifted the block */
     this.overrides = new Map();
+    /** scope -> token count at the moment the user lifted the block */
+    this.tokenOverrides = new Map();
   }
 
   /**
@@ -63,6 +90,7 @@ export class Ledger {
     const session = String(sessionId || '__global__');
     const day = dayKey(at, this.timeZone);
     const month = monthKey(at, this.timeZone);
+    const hour = hourKey(at, this.timeZone);
     const modelKey = `${provider}/${model}`;
 
     for (const [map, key] of [
@@ -70,6 +98,7 @@ export class Ledger {
       [this.days, day],
       [this.months, month],
       [this.models, modelKey],
+      [this.hours, hour],
     ]) {
       const bucket = map.get(key) ?? emptyBucket();
       addUsage(bucket, usage, costUsd);
@@ -80,6 +109,12 @@ export class Ledger {
     if (this.days.size > 400) {
       const oldest = [...this.days.keys()].sort()[0];
       this.days.delete(oldest);
+    }
+    // Hour keys sort inside one zone, so the oldest few are the ones to drop.
+    if (this.hours.size > HOUR_RETENTION) {
+      for (const key of [...this.hours.keys()].sort().slice(0, this.hours.size - HOUR_RETENTION)) {
+        this.hours.delete(key);
+      }
     }
   }
 
@@ -102,13 +137,64 @@ export class Ledger {
     return this.totals(sessionId, at)[scope] ?? 0;
   }
 
+  /**
+   * Token totals per budget scope, with every class kept separate.
+   * Mirrors `totals()`: same session id, same billing day/month keys.
+   * @param {string} sessionId
+   * @param {number} at
+   * @returns {{session: object, daily: object, monthly: object}}
+   */
+  tokenTotals(sessionId, at) {
+    return {
+      session: summaryOf(this.sessions.get(String(sessionId || '__global__'))),
+      daily: summaryOf(this.days.get(dayKey(at, this.timeZone))),
+      monthly: summaryOf(this.months.get(monthKey(at, this.timeZone))),
+    };
+  }
+
+  /** Everything ever recorded, for the "cumulative" line in the panel. */
+  allTime() {
+    const total = emptyBucket();
+    for (const bucket of this.months.values()) {
+      total.spentUsd += bucket.spentUsd;
+      total.inputTokens += bucket.inputTokens;
+      total.outputTokens += bucket.outputTokens;
+      total.cacheReadTokens += bucket.cacheReadTokens;
+      total.cacheWriteTokens += bucket.cacheWriteTokens;
+      total.calls += bucket.calls;
+    }
+    return summaryOf(total);
+  }
+
+  /**
+   * Rolling hourly series ending at `at` (oldest first).
+   * Gaps are real zeros: a quiet hour is not the same as a missing one.
+   * @param {{at?: number, hours?: number}} [options]
+   */
+  series({ at = Date.now(), hours = 24 } = {}) {
+    const span = Math.max(1, Math.min(24 * 8, Math.trunc(hours)));
+    const start = at - (span - 1) * 3_600_000;
+    const out = [];
+    for (let index = 0; index < span; index += 1) {
+      const key = hourKey(start + index * 3_600_000, this.timeZone);
+      out.push({ key, ...summaryOf(this.hours.get(key)) });
+    }
+    return out;
+  }
+
   /** Lift a hard block until spending grows past the current watermark. */
   setOverride(scope, spent, sessionId = '__global__') {
     this.overrides.set(this.overrideKey(scope, sessionId), spent);
   }
 
+  /** Lift a token-cap block; `unblock` sets both watermarks for a scope. */
+  setTokenOverride(scope, tokens, sessionId = '__global__') {
+    this.tokenOverrides.set(this.overrideKey(scope, sessionId), tokens);
+  }
+
   clearOverride(scope, sessionId = '__global__') {
     this.overrides.delete(this.overrideKey(scope, sessionId));
+    this.tokenOverrides.delete(this.overrideKey(scope, sessionId));
   }
 
   /** Session-scoped overrides are keyed by session; day/month stay global. */
@@ -126,6 +212,16 @@ export class Ledger {
     return out;
   }
 
+  /** Token watermarks for the same scopes (see `tokenTotals`). */
+  getTokenOverrides(sessionId) {
+    const out = {};
+    for (const scope of ['session', 'daily', 'monthly']) {
+      const value = this.tokenOverrides.get(this.overrideKey(scope, sessionId));
+      if (typeof value === 'number') out[scope] = value;
+    }
+    return out;
+  }
+
   /** @returns {Array<object>} per-model attribution, highest spend first */
   modelBreakdown() {
     return [...this.models.entries()]
@@ -134,9 +230,8 @@ export class Ledger {
         return {
           provider: slash === -1 ? '' : key.slice(0, slash),
           model: slash === -1 ? key : key.slice(slash + 1),
-          spentUsd: bucket.spentUsd,
+          ...summaryOf(bucket),
           tokens: tokensOf(bucket),
-          calls: bucket.calls,
         };
       })
       .sort((a, b) => b.spentUsd - a.spentUsd);
@@ -146,13 +241,15 @@ export class Ledger {
   serialize() {
     const dump = (map) => Object.fromEntries([...map.entries()].map(([key, value]) => [key, { ...value }]));
     return {
-      version: 1,
+      version: 2,
       timeZone: this.timeZone,
       sessions: dump(this.sessions),
       days: dump(this.days),
       months: dump(this.months),
+      hours: dump(this.hours),
       models: dump(this.models),
       overrides: Object.fromEntries(this.overrides),
+      tokenOverrides: Object.fromEntries(this.tokenOverrides),
     };
   }
 
@@ -174,14 +271,19 @@ export class Ledger {
     load(this.sessions, state.sessions);
     load(this.days, state.days);
     load(this.months, state.months);
+    load(this.hours, state.hours);
     load(this.models, state.models);
-    if (state.overrides && typeof state.overrides === 'object') {
-      for (const [scope, spent] of Object.entries(state.overrides)) {
-        if (typeof spent === 'number' && Number.isFinite(spent)) this.overrides.set(scope, spent);
+    const loadOverrides = (map, source) => {
+      if (source === null || typeof source !== 'object') return;
+      for (const [scope, value] of Object.entries(source)) {
+        if (typeof value === 'number' && Number.isFinite(value)) map.set(scope, value);
       }
-    }
+    };
+    loadOverrides(this.overrides, state.overrides);
+    // Version 1 snapshots have no token watermarks; an absent map is fine.
+    loadOverrides(this.tokenOverrides, state.tokenOverrides);
     return true;
   }
 }
 
-export { tokensOf };
+export { summaryOf, tokensOf };

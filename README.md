@@ -5,70 +5,56 @@
 <h1 align="center">dsh-token-gateway</h1>
 
 <p align="center">
+
   <strong>把 DSH 的每一次模型调用，收口到一个预算网关。</strong><br>
-  <sub>One admission gate · three budget scopes · cost attribution · alert / block / degrade</sub>
+  <sub>One admission gate · USD + token budgets · cost attribution · alert / block / degrade · in-composer panel</sub>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License: MIT"></a>
-  <a href="test/"><img src="https://img.shields.io/badge/tests-39%20passing-22c55e?style=flat-square" alt="39 tests passing"></a>
+  <a href="test/"><img src="https://img.shields.io/badge/tests-63%20passing-22c55e?style=flat-square" alt="63 tests passing"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A522.19-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node >= 22.19"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/DSH-0.2.2--rc.1-4f6bed?style=flat-square" alt="DSH 0.2.2-rc.1"></a>
   <a href="#贡献"><img src="https://img.shields.io/badge/PRs-welcome-ec4899?style=flat-square" alt="PRs welcome"></a>
 </p>
 
 <p align="center">
-  <a href="#架构图">架构图</a> ·
+  <a href="#效果图">效果图</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#预算策略">预算策略</a> ·
-  <a href="#配置">配置</a> ·
-  <a href="#控制面">控制面</a>
+  <a href="#控制面">控制面</a> ·
+  <a href="#架构图">架构图</a> ·
+  <a href="#计价与归属">计价与归属</a>
 </p>
 
 ---
 
-> [!NOTE]
-> **v0.1 MVP，可运行、可测试、可扩展。** 39 个测试全部通过，并已在隔离的 DSH `0.2.2-rc.1` web profile 中实际启动：`GET /token-gateway/v1/status` 返回 `200`。
-
 DSH 的所有模型调用——主循环、子代理、会话标题、压缩摘要——都会经过 `llm/stream`。这个插件在那个接缝上放了一道闸门：**先算预算，再放行；放行后按 usage 记账；超了按策略预警、拦截或降级。**
 
-- **零运行时依赖**，无 TypeScript 构建，改完即可加载
-- **三档预算**：会话 / 当日 / 当月，USD 记账，按配置币种展示
-- **可审计**：按模型、会话、日、月归属花费
+- **零运行时依赖、零构建**：纯 JS，改完即加载；连浏览器面板都是手写的产物
+- **两个维度、三档 scope**：USD 与 token 各自独立设限，会话 / 当日 / 当月
+- **可审计**：按模型、缓存命中率、小时序列归属花费
+- **有面板**：输入框下方一行 chip，点开是完整用量卡片
 - **有控制面**：`/gateway` 命令 + `/token-gateway/v1/*` HTTP API
 
 ---
 
-## 架构图
+## 效果图
 
-```mermaid
-flowchart LR
-    subgraph SRC["DSH model calls"]
-        A["Agent loop"]
-        B["Subagent"]
-        C["Title / compaction"]
-    end
+点开是完整用量卡片。同一块面板，左边按 token 显示，右边按金额显示：
 
-    A --> G["llm/stream<br/>waterfall"]
-    B --> G
-    C --> G
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshot-card-tokens.png" alt="Token Gateway 面板：token 单位" width="100%"></td>
+    <td align="center"><img src="docs/screenshot-card-cny.png" alt="Token Gateway 面板：金额单位" width="100%"></td>
+  </tr>
+</table>
 
-    G --> D{"budget policy<br/>session · day · month"}
+也可以直接用 `/gateway` 命令查看：
 
-    D -- "allow / warn" --> P["provider adapter"]
-    D -- "block" --> X["blockedStream<br/>BUDGET_BLOCKED"]
-    D -- "degrade" --> H["cheaper model<br/>same provider"]
-
-    P --> U["usage chunk"]
-    H --> U
-    U --> L[("ledger<br/>+ pricing")]
-    L --> D
-    L --> API["/gateway<br/>HTTP API"]
-```
-
-所以这里的「网关」是 **DSH 模型调用的统一准入层**，而不是另起一个 LiteLLM 式的独立代理进程。对外 OpenAI 兼容入口尚未实现，将来会复用同一套预算与账本。
-
-为什么不用 `agent/request`：该接缝已标记 deprecated，且明确要求不能改 provider/model（只能改 controls）。`llm/stream` 才是覆盖全部调用、且能在 `next()` 之前拦截的地方。
+<p align="center">
+  <img src="docs/screenshot-gateway-command.png" alt="/gateway 命令输出" width="100%">
+</p>
 
 ---
 
@@ -90,13 +76,13 @@ cd dsh-token-gateway
 dsh plugin --profile web add .
 ```
 
-默认配置开箱即用：会话 `$2`、当日 `$10`、当月 `$100`（USD），超限 `block`，只读控制面仅回环可访问。想改就编辑 profile 的 `cordis.patch.yml`（完整字段见[配置](#配置)）。
+默认配置开箱即用：会话 `$2`、当日 `$10`、当月 `$100`（USD），超限 `block`，只读控制面仅回环可访问。想改就编辑 profile 的 `cordis.patch.yml` 里 `id: token-gateway` 那条的 `config`——插件行是热重载的，**保存即生效，不用重启**。
 
-验证控制面：
+验证控制面（端口换成你自己的 `dsh web` 端口）：
 
 ```bash
-curl -s http://127.0.0.1:3080/token-gateway/v1/status | jq .data.action
-# "allow"
+curl -s http://127.0.0.1:49844/token-gateway/v1/status | jq .data.action
+# "allow"（新账本；随用量变为 warn / block）
 ```
 
 > [!TIP]
@@ -106,16 +92,18 @@ curl -s http://127.0.0.1:3080/token-gateway/v1/status | jq .data.action
 
 ## 预算策略
 
+预算有**两个独立维度**：金额（`budgets`，按 USD 记账）和 token（`tokenBudgets`，总数含缓存命中）。两者各含会话 / 当日 / 当月三档 scope，**所有 (scope × 维度) 里占比最高的那个决定动作**——任一维度触顶就触发策略，不会被另一维度的余量掩盖。
+
 | 条件 | `alert` | `block` | `degrade` |
 |---|---|---|---|
-| 所有 scope 均低于 `warnRatio` | allow | allow | allow |
-| 最高 scope ≥ `warnRatio`，未到 cap | warn | warn | `degradeAt: warn` 且存在映射 → degrade；否则 warn |
+| 所有 scope × 维度均低于 `warnRatio` | allow | allow | allow |
+| 最高占比 ≥ `warnRatio`，未到 cap | warn | warn | `degradeAt: warn` 且存在映射 → degrade；否则 warn |
 | 任一 scope ≥ cap | warn（`over: true`） | block | 存在映射 → degrade；否则 block |
 | 用户执行 `unblock <scope>` | 记录 watermark | 在 watermark 之前不再 block | 同 block |
 
-`unblock` 的语义是**按当前花费打一个水位线**：花费继续增长并越过水位线后会重新拦截，避免“解一次就永久失效”。`session` 的 watermark 按会话隔离，`daily` / `monthly` 是全局的。
+`unblock` 的语义是**按当前用量打一个水位线**：用量继续增长并越过水位线后会重新拦截，避免「解一次就永久失效」。它会同时打 USD 和 token 两个水位线，所以无论哪个维度拦的都能解开。`session` 的 watermark 按会话隔离，`daily` / `monthly` 是全局的。
 
-`degradation` 只允许同 provider 的模型映射，例如：
+`degradation` 按**模型名**映射到更便宜的模型，例如：
 
 ```yaml
 degradation:
@@ -126,70 +114,13 @@ degradation:
 
 ---
 
-## 配置
-
-所有字段在 [`src/config.js`](src/config.js) 中校验，非法值直接让插件加载失败（**fail loud**，不静默关掉预算）。
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `budgets.session/daily/monthly` | `2 / 10 / 100` USD | `null` 为不限；`0` 被拒绝（不是合法的 cap） |
-| `warnRatio` | `0.8` | 首次预警比例 |
-| `overLimit` | `block` | `alert` / `block` / `degrade` |
-| `degradation` | `{}` | 模型 → 更便宜的同 provider 模型 |
-| `degradeAt` | `warn` | 仅 `degrade` 生效：warn 阶段还是 hard 阶段开始降级 |
-| `pricing.prices` | `{}` | 覆盖内置价格表，key 支持 `model` 或 `provider/model` |
-| `pricing.defaultPrice` | 见源码 | 未定价模型的兜底；`priced: false` 时按 0 计入 |
-| `pricing.peak.windows` | 工作日两段 | 可自定义星期/时段 |
-| `pricing.peak.holidays` | `[]` | `YYYY-MM-DD`，全天谷价 |
-| `gateway.http` | `true` | 是否注册控制面 |
-| `gateway.token` | `''` | 空 = 仅回环；非空 = 所有请求需 Bearer |
-| `persistence.file` | `$DSH_HOME/token-gateway/ledger.json` | 支持 `~` / `$DSH_HOME` |
-
-<details>
-<summary><strong>完整配置示例</strong>（点击展开）</summary>
-
-```yaml
-- insert:
-    - id: token-gateway
-      name: dsh-token-gateway
-      config:
-        budgets:
-          session: 2      # USD；null/省略 = 不限
-          daily: 10
-          monthly: 100
-        warnRatio: 0.8
-        overLimit: block  # alert | block | degrade
-        degradation:
-          deepseek-v4-pro: deepseek-v4-flash
-        degradeAt: warn   # warn | hard
-        currency: { code: CNY, rate: 7.2, decimals: 3 }
-        pricing:
-          prices: {}      # USD / 1M tokens，覆盖内置快照
-          peak:
-            enabled: true
-            timeZone: Asia/Shanghai
-            offPeakMultiplier: 0.5
-        gateway:
-          http: true
-          basePath: /token-gateway
-          token: ''       # 非空时所有控制面请求需 Bearer
-        persistence:
-          enabled: true
-          file: $DSH_HOME/token-gateway/ledger.json
-          flushMs: 500
-```
-
-</details>
-
----
-
 ## 控制面
 
 ### `/gateway` 命令
 
 ```text
 /gateway                 # 会话/今日/本月花费 + 当前策略
-/gateway usage           # 按模型归属（Top 10）
+/gateway usage           # token 分项 + 按模型归属（Top 10）
 /gateway unblock session # 解除当前水位线之前的 session block
 /gateway help
 ```
@@ -201,7 +132,9 @@ degradation:
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/v1/status?session=<id>` | 预算 / 花费 / 策略 / 覆盖水位 |
-| `GET` | `/v1/usage?session=<id>` | 花费 + 按模型归属 |
+| `GET` | `/v1/usage?session=<id>` | 花费 + token 分项 + 按模型归属 |
+| `GET` | `/v1/stats?session=<id>&hours=24` | 面板用的完整快照：token 分项、缓存命中率、USD/token 两套 ratio、小时序列、累计 |
+| `GET` | `/v1/series?hours=24` | 只要滚动小时序列 |
 | `POST` | `/v1/unblock` | body `{ scope, sessionId? }` |
 
 安全默认值：
@@ -210,13 +143,47 @@ degradation:
 - 配置 token 后，所有请求必须带 `Authorization: Bearer <token>`
 - 写操作只有 `unblock`，且同样是幂等水位线语义
 
-实测（隔离 profile，`--port 0`）：
+实测：
 
 ```text
 GET  /token-gateway/v1/status  -> 200 {"ok":true,...}
-GET  /token-gateway/v1/usage   -> 200 {"ok":true,"data":{"models":[]...}}
+GET  /token-gateway/v1/stats   -> 200 {"ok":true,"data":{"tokenTotals":...}}
 POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 ```
+
+---
+
+## 架构图
+
+```mermaid
+flowchart LR
+    subgraph SRC["DSH model calls"]
+        A["Agent loop"]
+        B["Subagent"]
+        C["Title / compaction"]
+    end
+
+    A --> G["llm/stream<br/>waterfall"]
+    B --> G
+    C --> G
+
+    G --> D{"budget policy<br/>USD + tokens<br/>session · day · month"}
+
+    D -- "allow / warn" --> P["provider adapter"]
+    D -- "block" --> X["blockedStream<br/>BUDGET_BLOCKED"]
+    D -- "degrade" --> H["cheaper model<br/>same provider"]
+
+    P --> U["usage chunk"]
+    H --> U
+    U --> L[("ledger<br/>+ pricing")]
+    L --> D
+    L --> API["/gateway<br/>HTTP API"]
+    API --> UI["composer dock chip"]
+```
+
+所以这里的「网关」是 **DSH 模型调用的统一准入层**，而不是另起一个 LiteLLM 式的独立代理进程。对外 OpenAI 兼容入口尚未实现，将来会复用同一套预算与账本。
+
+为什么不用 `agent/request`：该接缝已标记 deprecated，且明确要求不能改 provider/model（只能改 controls）。`llm/stream` 才是覆盖全部调用、且能在 `next()` 之前拦截的地方。
 
 ---
 
@@ -228,8 +195,16 @@ POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 - 归属精度：
   - `llm/stream` 的 `usage` 是权威来源
   - 带 `sessionId` 的调用记到该会话
-  - 不带 `sessionId` 的辅助调用（标题 / 压缩）回退到最近活跃会话，再回退到 `__global__`
+  - 不带 `sessionId` 的辅助调用（标题 / 压缩）回退到最近活跃会话，再回退到 `__global__`；子代理会话不会抢走这个回退归属
   - 重试的每次尝试各自计量（provider 实际计费）
+
+实测口径校验（真实一次调用：89216 cacheRead + 323 input + 707 output，谷时）：
+
+```text
+(89216 × 0.0056 + 707 × 1.12 + 323 × 0.28) ÷ 1M  →  × 0.5  =  $0.000691
+```
+
+与账本 `totals.session` 完全一致。
 
 ### 持久化
 
@@ -237,37 +212,9 @@ POST /token-gateway/v1/unblock -> 200 {"ok":true,"scope":"session"...}
 
 - 进程内 Map → `serialize()` → 原子写（`tmp` + `rename`，`0600`）
 - 写入防抖 `persistence.flushMs`，插件 dispose 时强制 flush
-- 启动时 `restore()` 逐桶校验，损坏的桶忽略，不阻塞启动
+- 启动时 `restore()` 逐桶校验，损坏的桶忽略；旧版本快照（无小时序列）也能恢复
 - 未启用持久化时退化为纯内存（重启归零）
-
----
-
-## 开发
-
-```bash
-node --test test/*.test.js   # 39 tests
-npm run check                # node --check 全部源码
-```
-
-```text
-.
-├── package.json          # dsh.bundle.patch + engines
-├── cordis.patch.yml      # 默认配置 / profile 插入行
-├── docs/
-│   └── banner.svg        # README 头图
-├── src/
-│   ├── index.js          # cordis 接线（llm/stream, commands, webServer）
-│   ├── gateway.js        # 准入、计量、控制面核心（可脱离 cordis 测试）
-│   ├── config.js         # 默认值 + 严格校验
-│   ├── pricing.js        # 价格表、峰谷、金额格式化
-│   ├── policy.js         # 纯预算决策引擎
-│   ├── ledger.js         # 会话/日/月/模型账本
-│   ├── store.js          # 原子 JSON 持久化
-│   └── stream.js         # 阻塞流 + usage 旁路计量
-└── test/                 # 39 个测试（含假 ctx 的端到端接线）
-```
-
-架构上刻意把 **cordis 接线**（`index.js`）与 **纯逻辑**（`policy.js` / `ledger.js` / `pricing.js`）分开，前者只负责生命周期，后者可以脱离宿主直接测试。
+- 小时序列保留 8 天，日桶上限 400 天
 
 ---
 
@@ -276,10 +223,10 @@ npm run check                # node --check 全部源码
 欢迎 issue / PR。提交前请确保：
 
 ```bash
-node --test test/*.test.js && npm run check
+npm run verify
 ```
 
-如果新增配置字段，请同步更新 `src/config.js` 的校验、`cordis.patch.yml` 的示例，以及本 README 的字段表。
+如果新增配置字段，请同步更新 `src/config.js` 的校验与 `cordis.patch.yml` 的示例。
 
 ---
 

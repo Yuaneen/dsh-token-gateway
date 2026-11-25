@@ -15,6 +15,14 @@
           daily: 10
           monthly: 100
 
+        # Optional token caps, in total tokens (cached input included). A separate
+        # dimension from the USD caps: a call is admitted only when every capped
+        # scope passes in BOTH dimensions. null = no token cap.
+        tokenBudgets:
+          session: null
+          daily: null
+          monthly: null
+
         # alert  = notify only
         # block  = refuse new model calls until /gateway unblock <scope>
         # degrade = re-dispatch to the cheaper model in `degradation`

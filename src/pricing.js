@@ -54,6 +54,17 @@ export function monthKey(at, timeZone) {
   return dayKey(at, timeZone).slice(0, 7);
 }
 
+/**
+ * Billing hour in the configured zone, YYYY-MM-DDTHH.
+ * Sorts lexicographically inside one zone, which is what the series needs.
+ * @param {number} at epoch milliseconds
+ * @param {string} timeZone IANA zone
+ */
+export function hourKey(at, timeZone) {
+  const parts = partsOf(at, timeZone, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' });
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}`;
+}
+
 function minuteOfDay(text) {
   const [hour, minute] = text.split(':').map(Number);
   return hour * 60 + minute;

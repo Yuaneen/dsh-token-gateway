@@ -16,6 +16,13 @@ const DEFAULT_CONFIG = Object.freeze({
   /** Budget caps in USD per scope; null or omitted = unlimited. */
   budgets: { session: 2, daily: 10, monthly: 100 },
 
+  /**
+   * Token caps per scope, in total tokens (cached input included). They are a
+   * second, independent dimension: a call is admitted only when every capped
+   * scope passes in both USD and tokens. null = no token cap.
+   */
+  tokenBudgets: { session: null, daily: null, monthly: null },
+
   /** Fraction of a cap that raises the first warning. */
   warnRatio: 0.8,
 
@@ -169,6 +176,19 @@ export function resolveConfig(input = {}) {
     assertNumber(config.budgets[scope], `budgets.${scope}`, { allowNull: true });
     if (config.budgets[scope] === 0) {
       throw new TypeError(`dsh-token-gateway: budgets.${scope} must be positive or null (0 is not a cap)`);
+    }
+  }
+
+  if (!isPlainObject(config.tokenBudgets)) {
+    throw new TypeError('dsh-token-gateway: tokenBudgets must be an object');
+  }
+  for (const scope of ['session', 'daily', 'monthly']) {
+    assertNumber(config.tokenBudgets[scope], `tokenBudgets.${scope}`, { allowNull: true });
+    if (config.tokenBudgets[scope] === 0) {
+      throw new TypeError(`dsh-token-gateway: tokenBudgets.${scope} must be positive or null (0 is not a cap)`);
+    }
+    if (config.tokenBudgets[scope] !== null && !Number.isInteger(config.tokenBudgets[scope])) {
+      throw new TypeError(`dsh-token-gateway: tokenBudgets.${scope} must be a whole number of tokens`);
     }
   }
 

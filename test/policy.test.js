@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { budgetRatios, evaluateBudget } from '../src/policy.js';
+import { budgetRatios, evaluateBudget, tokenRatios } from '../src/policy.js';
 
 const base = {
   budgets: { session: 1, daily: 10, monthly: 100 },
@@ -119,4 +119,68 @@ test('budgetRatios reports spend, cap and ratio per scope', () => {
   assert.equal(ratios.session.ratio, 0.5);
   assert.equal(ratios.daily.ratio, 0.5);
   assert.equal(ratios.monthly.cap, 100);
+});
+
+/** Token totals shaped like Ledger.tokenTotals(). */
+function tokens(total) {
+  return { session: { totalTokens: total }, daily: { totalTokens: total }, monthly: { totalTokens: total } };
+}
+
+const tokenBase = { ...base, tokenBudgets: { session: 1_000_000, daily: null, monthly: null } };
+
+test('token caps block independently of USD spend', () => {
+  const decision = evaluateBudget({
+    ...tokenBase,
+    totals: { session: 0.01, daily: 1, monthly: 2 },
+    tokenTotals: tokens(1_200_000),
+    overrides: {},
+    tokenOverrides: {},
+  });
+  assert.equal(decision.action, 'block');
+  assert.equal(decision.scope, 'session');
+  assert.equal(decision.metric, 'tokens');
+  assert.match(decision.reason, /token budget exceeded/);
+});
+
+test('the heavier dimension decides which metric is reported', () => {
+  const decision = evaluateBudget({
+    ...base,
+    tokenBudgets: { session: 20_000_000, daily: null, monthly: null },
+    totals: { session: 5, daily: 1, monthly: 2 }, // 5x the USD cap
+    tokenTotals: tokens(1_000_000), // 5% of the token cap
+    overrides: {},
+    tokenOverrides: {},
+  });
+  assert.equal(decision.action, 'block');
+  assert.equal(decision.metric, 'usd');
+});
+
+test('a token watermark lifts a token block until tokens grow again', () => {
+  const lifted = evaluateBudget({
+    ...tokenBase,
+    totals: { session: 0.01, daily: 1, monthly: 2 },
+    tokenTotals: tokens(1_200_000),
+    overrides: {},
+    tokenOverrides: { session: 1_200_000 },
+  });
+  assert.equal(lifted.action, 'warn');
+
+  const again = evaluateBudget({
+    ...tokenBase,
+    totals: { session: 0.01, daily: 1, monthly: 2 },
+    tokenTotals: tokens(1_300_000),
+    overrides: {},
+    tokenOverrides: { session: 1_200_000 },
+  });
+  assert.equal(again.action, 'block');
+});
+
+test('tokenRatios carries the class breakdown next to the cap', () => {
+  const ratios = tokenRatios(
+    { daily: { totalTokens: 500, cacheReadTokens: 400, inputTokens: 100, outputTokens: 0, calls: 1 } },
+    { daily: 1_000 },
+  );
+  assert.equal(ratios.daily.ratio, 0.5);
+  assert.equal(ratios.daily.cacheReadTokens, 400);
+  assert.equal(ratios.session.cap, null);
 });

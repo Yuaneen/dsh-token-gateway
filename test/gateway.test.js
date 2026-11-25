@@ -213,3 +213,140 @@ test('invalid config fails loudly', () => {
   assert.throws(() => resolveConfig({ budgets: null }), /budgets must be an object/);
   assert.throws(() => resolveConfig({ gateway: null }), /gateway must be an object/);
 });
+
+test('token caps fail loudly', () => {
+  assert.throws(() => resolveConfig({ tokenBudgets: { session: 0 } }), /tokenBudgets\.session/);
+  assert.throws(() => resolveConfig({ tokenBudgets: { daily: 1.5 } }), /whole number of tokens/);
+  assert.throws(() => resolveConfig({ tokenBudgets: null }), /tokenBudgets must be an object/);
+});
+
+/* ------------------------------------------------------------ control plane */
+
+function mockResponse() {
+  const out = { status: 0, body: '' };
+  return { out, writeHead(status) { out.status = status; }, end(body) { out.body = String(body ?? ''); } };
+}
+
+function mockRequest(url, method = 'GET') {
+  return { method, url, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+}
+
+async function get(gateway, url) {
+  const res = mockResponse();
+  await gateway.handleHttp(mockRequest(url), res);
+  return { status: res.out.status, body: JSON.parse(res.out.body) };
+}
+
+test('the stats route serves token totals, cache rate and the series', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const gateway = createGateway({ config: config(), ledger, now: () => T });
+  await collect(gateway.onLlmStream({ sessionId: 's1', provider: 'deepseek-official', model: 'deepseek-flash' }, upstream));
+
+  const { status, body } = await get(gateway, '/token-gateway/v1/stats?session=s1&hours=4');
+  assert.equal(status, 200);
+  assert.equal(body.data.sessionId, 's1');
+  assert.equal(body.data.tokenTotals.session.totalTokens, 2_000_000);
+  assert.equal(body.data.tokenTotals.session.outputTokens, 1_000_000);
+  assert.equal(body.data.cache.cacheHitRate, 0);
+  assert.equal(body.data.models[0].totalTokens, 2_000_000);
+  assert.equal(body.data.series.length, 4);
+  assert.equal(body.data.series.at(-1).totalTokens, 2_000_000);
+  assert.equal(body.data.allTime.totalTokens, 2_000_000);
+});
+
+test('the series route answers the requested window and clamps garbage', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const gateway = createGateway({ config: config(), ledger, now: () => T });
+
+  const ok = await get(gateway, '/token-gateway/v1/series?hours=6');
+  assert.equal(ok.body.data.points.length, 6);
+  assert.equal(ok.body.data.hours, 6);
+
+  const junk = await get(gateway, '/token-gateway/v1/series?hours=abc');
+  assert.equal(junk.body.data.points.length, 24);
+});
+
+test('a token cap blocks the next call end to end', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({
+    sessionId: 's1',
+    provider: 'p',
+    model: 'm',
+    usage: { inputTokens: 2_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    costUsd: 0,
+    at: T,
+  });
+  const gateway = createGateway({
+    config: config({
+      budgets: { session: null, daily: null, monthly: null },
+      tokenBudgets: { session: 1_000, daily: null, monthly: null },
+    }),
+    ledger,
+    now: () => T,
+  });
+
+  let called = false;
+  const chunks = await collect(
+    gateway.onLlmStream({ sessionId: 's1', provider: 'deepseek-official', model: 'deepseek-flash' }, () => {
+      called = true;
+      return upstream();
+    }),
+  );
+
+  assert.equal(called, false);
+  assert.equal(chunks.at(-1).reason.failure.code, 'BUDGET_BLOCKED');
+  assert.match(chunks.at(-1).reason.failure.message, /token budget exceeded/);
+});
+
+test('unblock lifts the token watermark as well as the USD one', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({
+    sessionId: 's1',
+    provider: 'p',
+    model: 'm',
+    usage: { inputTokens: 5_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    costUsd: 11,
+    at: T,
+  });
+  const gateway = createGateway({ config: config(), ledger, now: () => T });
+
+  gateway.handleCommand({ rawInput: 'unblock session', agent: { session: { id: 's1' } } });
+  assert.deepEqual(ledger.getTokenOverrides('s1'), { session: 5_000 });
+
+  const status = gateway.snapshot('s1', T);
+  assert.equal(status.action, 'warn');
+});
+
+test('a subagent session cannot steal the fallback attribution', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const gateway = createGateway({ config: config(), ledger, now: () => T });
+
+  gateway.onSessionEvent({ id: 'main', delegationDepth: 0 });
+  gateway.onSessionEvent({ id: 'subagent', delegationDepth: 1 });
+  assert.equal(gateway.snapshot().sessionId, 'main', 'a delegated session must not claim the default');
+
+  // A session event without a depth field keeps the old behaviour.
+  gateway.onSessionEvent({ id: 'main-2' });
+  assert.equal(gateway.snapshot().sessionId, 'main-2');
+});
+
+test('the status line shows a token cap only where one is configured', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({
+    sessionId: 's1',
+    provider: 'p',
+    model: 'm',
+    usage: { inputTokens: 400_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    costUsd: 0.5,
+    at: T,
+  });
+  const gateway = createGateway({
+    config: config({ tokenBudgets: { session: 1_000_000, daily: null, monthly: null } }),
+    ledger,
+    now: () => T,
+  });
+
+  const text = formatStatus(gateway.snapshot('s1', T));
+  assert.match(text, /session tok\s+500\.0k \/ 1\.00M tokens\s+\(50%\)/);
+  assert.doesNotMatch(text, /today tok/);
+});

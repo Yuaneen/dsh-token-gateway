@@ -16,7 +16,7 @@
  */
 
 import { costOf, formatMoney, formatTokens, priceForModel } from './pricing.js';
-import { SCOPES, budgetRatios, evaluateBudget } from './policy.js';
+import { SCOPES, budgetRatios, evaluateBudget, formatTokenCount, tokenRatios } from './policy.js';
 import { blockedStream, meteredStream } from './stream.js';
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', '::ffff:7f00:1']);
@@ -83,14 +83,25 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
   function decide(options, sessionId, at) {
     return evaluateBudget({
       totals: ledger.totals(sessionId, at),
+      tokenTotals: ledger.tokenTotals(sessionId, at),
       budgets: config.budgets,
+      tokenBudgets: config.tokenBudgets,
       warnRatio: config.warnRatio,
       overLimit: config.overLimit,
       degradeAt: config.degradeAt,
       degradation: config.degradation,
       model: typeof options?.model === 'string' ? options.model : '',
       overrides: ledger.getOverrides(sessionId),
+      tokenOverrides: ledger.getTokenOverrides(sessionId),
     });
+  }
+
+  /** Cache-hit rate of the prompt side: cached input over all input. */
+  function cacheStats(summary) {
+    const cached = summary?.cacheReadTokens ?? 0;
+    const fresh = summary?.inputTokens ?? 0;
+    const promptTokens = cached + fresh;
+    return { promptTokens, cacheHitRate: promptTokens === 0 ? null : cached / promptTokens };
   }
 
   function recordUsage(options, usage, sessionId, at) {
@@ -159,9 +170,18 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
     return meteredStream(next(), (usage) => recordUsage(options, usage, sessionId, at));
   }
 
-  /** Track a fallback session id for auxiliary calls without `options.sessionId`. */
+  /**
+   * Track a fallback session id for auxiliary calls without `options.sessionId`.
+   *
+   * Only the main session may claim it: a subagent session (delegation depth > 0)
+   * runs its own calls and would otherwise steal the attribution for titles and
+   * compaction, making the panel show a subagent's tiny totals as "this session".
+   */
   function onSessionEvent(session) {
-    if (session?.id !== undefined) state.lastSessionId = String(session.id);
+    if (session?.id === undefined) return;
+    const depth = session.delegationDepth;
+    if (typeof depth === 'number' && depth > 0) return;
+    state.lastSessionId = String(session.id);
   }
 
   /**
@@ -171,31 +191,44 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
    */
   function snapshot(sessionId = state.lastSessionId ?? '__global__', at = now()) {
     const totals = ledger.totals(sessionId, at);
+    const tokenTotals = ledger.tokenTotals(sessionId, at);
+    const overrides = ledger.getOverrides(sessionId);
+    const tokenOverrides = ledger.getTokenOverrides(sessionId);
     const decision = evaluateBudget({
       totals,
+      tokenTotals,
       budgets: config.budgets,
+      tokenBudgets: config.tokenBudgets,
       warnRatio: config.warnRatio,
       overLimit: config.overLimit,
       degradeAt: config.degradeAt,
       degradation: config.degradation,
       model: '',
-      overrides: ledger.getOverrides(sessionId),
+      overrides,
+      tokenOverrides,
     });
     return {
       generatedAt: new Date(at).toISOString(),
       sessionId,
       currency: config.currency,
       budgets: config.budgets,
+      tokenBudgets: config.tokenBudgets,
       warnRatio: config.warnRatio,
       overLimit: config.overLimit,
       totals,
+      tokenTotals,
+      allTime: ledger.allTime(),
+      cache: cacheStats(tokenTotals.daily),
       ratios: budgetRatios(totals, config.budgets),
-      overrides: ledger.getOverrides(sessionId),
+      tokenRatios: tokenRatios(tokenTotals, config.tokenBudgets),
+      overrides,
+      tokenOverrides,
       // Scope-level policy, not model-specific: with overLimit=degrade the
       // actual outcome depends on whether the current model has a mapping.
       action: decision.over && config.overLimit === 'degrade' ? 'degrade' : decision.action,
       over: decision.over,
       scope: decision.scope,
+      metric: decision.metric,
       reason: decision.reason,
       models: ledger.modelBreakdown(),
     };
@@ -236,8 +269,32 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
             sessionId: id,
             generatedAt: new Date(at).toISOString(),
             totals: ledger.totals(id, at),
+            tokenTotals: ledger.tokenTotals(id, at),
             models: ledger.modelBreakdown(),
           },
+        });
+        return;
+      }
+
+      // Token-first view for the panel: status + hourly series in one reply, so
+      // a single poll paints the whole card.
+      if (req.method === 'GET' && route === '/v1/stats') {
+        const sessionId = url.searchParams.get('session') ?? undefined;
+        const at = now();
+        const hours = Number.parseInt(url.searchParams.get('hours') ?? '24', 10);
+        sendJson(res, 200, {
+          ok: true,
+          data: { ...snapshot(sessionId ?? undefined, at), series: ledger.series({ at, hours: Number.isFinite(hours) ? hours : 24 }) },
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && route === '/v1/series') {
+        const hours = Number.parseInt(url.searchParams.get('hours') ?? '24', 10);
+        const at = now();
+        sendJson(res, 200, {
+          ok: true,
+          data: { generatedAt: new Date(at).toISOString(), hours, points: ledger.series({ at, hours: Number.isFinite(hours) ? hours : 24 }) },
         });
         return;
       }
@@ -258,9 +315,18 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
         const at = now();
         const id = typeof body.sessionId === 'string' ? body.sessionId : state.lastSessionId ?? '__global__';
         const spent = ledger.spentFor(scope, id, at);
+        const tokens = ledger.tokenTotals(id, at)[scope]?.totalTokens ?? 0;
         ledger.setOverride(scope, spent, id);
+        ledger.setTokenOverride(scope, tokens, id);
         persist?.markDirty();
-        sendJson(res, 200, { ok: true, scope, sessionId: id, spent, note: 'block lifted until spending grows past this watermark' });
+        sendJson(res, 200, {
+          ok: true,
+          scope,
+          sessionId: id,
+          spent,
+          tokens,
+          note: 'block lifted until spending grows past this watermark',
+        });
         return;
       }
 
@@ -291,11 +357,13 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
         return { kind: 'error', text: `usage: /gateway unblock <${SCOPES.join('|')}>` };
       }
       const spent = ledger.spentFor(scope, sessionId, at);
+      const tokens = ledger.tokenTotals(sessionId, at)[scope]?.totalTokens ?? 0;
       ledger.setOverride(scope, spent, sessionId);
+      ledger.setTokenOverride(scope, tokens, sessionId);
       persist?.markDirty();
       return {
         kind: 'success',
-        text: `Token Gateway: lifted the ${scope} block at ${formatMoney(spent, config.currency)}. It re-blocks after further spending.`,
+        text: `Token Gateway: lifted the ${scope} block at ${formatMoney(spent, config.currency)} / ${formatTokenCount(tokens)} tokens. It re-blocks after further spending.`,
       };
     }
 
@@ -312,20 +380,33 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
 function line(label, scope, snapshot) {
   const entry = snapshot.ratios[scope];
   const spent = formatMoney(entry.spent, snapshot.currency);
-  if (entry.cap === null) return `${label.padEnd(8)} ${spent}  (no cap)`;
+  if (entry.cap === null) return `${label.padEnd(11)} ${spent}  (no cap)`;
   const ratio = entry.ratio === null ? 0 : entry.ratio;
-  return `${label.padEnd(8)} ${spent} / ${formatMoney(entry.cap, snapshot.currency)}  (${Math.round(ratio * 100)}%)`;
+  return `${label.padEnd(11)} ${spent} / ${formatMoney(entry.cap, snapshot.currency)}  (${Math.round(ratio * 100)}%)`;
+}
+
+/** One token line per scope, only where a token cap is configured. */
+function tokenLine(label, scope, snapshot) {
+  const cap = snapshot.tokenBudgets?.[scope];
+  if (cap === null || cap === undefined) return null;
+  const summary = snapshot.tokenRatios?.[scope] ?? { totalTokens: 0, ratio: 0 };
+  return `${`${label} tok`.padEnd(11)} ${formatTokenCount(summary.totalTokens)} / ${formatTokenCount(cap)} tokens  (${Math.round((summary.ratio ?? 0) * 100)}%)`;
 }
 
 /** Human-readable `/gateway` status. */
 export function formatStatus(snapshot) {
-  return [
-    `Token Gateway · policy ${snapshot.overLimit} · action ${snapshot.action}`,
-    line('session', 'session', snapshot),
-    line('today', 'daily', snapshot),
-    line('month', 'monthly', snapshot),
-    `warn at ${Math.round(snapshot.warnRatio * 100)}% · ${snapshot.reason}`,
-  ].join('\n');
+  const lines = [`Token Gateway · policy ${snapshot.overLimit} · action ${snapshot.action}`];
+  for (const [label, scope] of [['session', 'session'], ['today', 'daily'], ['month', 'monthly']]) {
+    lines.push(line(label, scope, snapshot));
+    const tokens = tokenLine(label, scope, snapshot);
+    if (tokens !== null) lines.push(tokens);
+  }
+  const cache = snapshot.cache;
+  if (cache?.cacheHitRate !== null && cache?.cacheHitRate !== undefined) {
+    lines.push(`cache hit ${Math.round(cache.cacheHitRate * 100)}% of ${formatTokenCount(cache.promptTokens)} prompt tokens today`);
+  }
+  lines.push(`warn at ${Math.round(snapshot.warnRatio * 100)}% · ${snapshot.reason}`);
+  return lines.join('\n');
 }
 
 /** Human-readable `/gateway usage`. */
@@ -339,5 +420,11 @@ export function formatUsage(snapshot) {
     snapshot.totals.daily,
     snapshot.currency,
   )} · month ${formatMoney(snapshot.totals.monthly, snapshot.currency)}`;
-  return [header, rows.length === 0 ? '  (no metered calls yet)' : 'by model:', ...rows].join('\n');
+  const daily = snapshot.tokenTotals?.daily;
+  const split = daily === undefined
+    ? null
+    : `tokens today: ${formatTokens(daily.totalTokens)} · cache hit ${formatTokens(daily.cacheReadTokens)} · fresh in ${formatTokens(
+      daily.inputTokens,
+    )} · out ${formatTokens(daily.outputTokens)}`;
+  return [header, split, rows.length === 0 ? '  (no metered calls yet)' : 'by model:', ...rows].filter(Boolean).join('\n');
 }
