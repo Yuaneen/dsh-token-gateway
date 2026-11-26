@@ -73,6 +73,75 @@ test('blocks an over-budget call without touching the upstream', async () => {
   assert.equal(chunks.at(-1).reason.failure.code, 'BUDGET_BLOCKED');
 });
 
+test('an always-retry provider gets a terminal block, not a retryable finish', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 11, at: T });
+  let called = false;
+  const llm = {
+    providerRetryPolicy: () => ({ mode: 'always' }),
+    stream: () => {
+      throw new Error('the degrade path must not run');
+    },
+  };
+  const gateway = createGateway({
+    config: config({ budgets: { session: 10, daily: 50, monthly: 500 } }),
+    ledger,
+    llm,
+    now: () => T,
+  });
+
+  await assert.rejects(
+    collect(
+      gateway.onLlmStream({ sessionId: 's1', provider: 'deepseek-official', model: 'deepseek-v4-pro' }, () => {
+        called = true;
+        return upstream();
+      }),
+    ),
+    (error) => {
+      assert.equal(error.name, 'BudgetBlockedError');
+      assert.equal(error.code, 'BUDGET_BLOCKED');
+      assert.match(error.message, /blocked this request/i);
+      return true;
+    },
+  );
+  assert.equal(called, false);
+});
+
+test('a normal policy that lists BUDGET_BLOCKED also gets a terminal block', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 11, at: T });
+  const gateway = createGateway({
+    config: config({ budgets: { session: 10, daily: 50, monthly: 500 } }),
+    ledger,
+    llm: { providerRetryPolicy: () => ({ mode: 'normal', retryableCodes: ['BUDGET_BLOCKED'] }) },
+    now: () => T,
+  });
+
+  await assert.rejects(
+    collect(gateway.onLlmStream({ sessionId: 's1', provider: 'deepseek-official', model: 'deepseek-v4-pro' }, upstream)),
+    /blocked this request/i,
+  );
+});
+
+test('degrade without an LLM service is terminal', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 11, at: T });
+  const gateway = createGateway({
+    config: config({
+      overLimit: 'degrade',
+      degradation: { 'deepseek-v4-pro': 'deepseek-v4-flash' },
+      budgets: { session: 10, daily: 50, monthly: 500 },
+    }),
+    ledger,
+    now: () => T,
+  });
+
+  await assert.rejects(
+    collect(gateway.onLlmStream({ sessionId: 's1', provider: 'deepseek-official', model: 'deepseek-v4-pro' }, upstream)),
+    /no LLM service is available/i,
+  );
+});
+
 test('alert policy passes through even over the cap', async () => {
   const ledger = new Ledger({ timeZone: ZONE });
   ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 11, at: T });

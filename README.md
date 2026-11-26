@@ -105,6 +105,8 @@ curl -s http://127.0.0.1:49844/token-gateway/v1/status | jq .data.action
 
 `unblock` 的语义是**按当前用量打一个水位线**：用量继续增长并越过水位线后会重新拦截，避免「解一次就永久失效」。它会同时打 USD 和 token 两个水位线，所以无论哪个维度拦的都能解开。`session` 的 watermark 按会话隔离，`daily` / `monthly` 按计费周期隔离——今天解开的 daily 不会抬高明天的上限，本月解开的 monthly 也不会带进下个月（升级后旧版本遗留的、没有周期维度的 daily/monthly 水位线会被丢弃，需要时重新执行一次 `unblock`）。
 
+当 provider 的 `retryPolicy.mode` 是 `always`，或 normal 策略显式把 `BUDGET_BLOCKED` 列进 `retryableCodes` 时，block 会以 `BUDGET_BLOCKED` 错误**终止**而不是发 error finish——否则 always executor 会把同一个被拦的 step 无限重试。normal 默认策略仍保持原来的 text block + error finish，用户能看到 blocked 原因。
+
 `degradation` 按**模型名**映射到更便宜的模型，例如：
 
 ```yaml
