@@ -320,7 +320,12 @@ function mockResponse() {
 }
 
 function mockRequest(url, method = 'GET') {
-  return { method, url, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+  return {
+    method,
+    url,
+    headers: { host: '127.0.0.1:3080' },
+    socket: { remoteAddress: '127.0.0.1' },
+  };
 }
 
 async function get(gateway, url) {

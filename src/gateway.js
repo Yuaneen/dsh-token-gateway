@@ -13,8 +13,10 @@
  * Control plane
  *   `/gateway` command (in-session) + `GET/POST {basePath}/v1/*` on the DSH
  *   web host, with a fixed-path client bootstrap. Reads are loopback-gated
- *   when no token is set; the only write is the idempotent `unblock`.
- */
+ *   when no token is set; the only write is the idempotent `unblock`, guarded
+ *   by JSON, same-origin and the token. */
+
+import { timingSafeEqual } from 'node:crypto';
 
 import { costOf, formatMoney, formatTokens, priceForModel } from './pricing.js';
 import { SCOPES, budgetRatios, evaluateBudget, formatTokenCount, tokenRatios } from './policy.js';
@@ -33,6 +35,44 @@ function isLoopback(address) {
   if (typeof address !== 'string') return false;
   if (LOOPBACK.has(address)) return true;
   return address.startsWith('127.') || address.startsWith('::ffff:127.');
+}
+
+/**
+ * Whether a Host header names the loopback interface. A request can reach
+ * 127.0.0.1 from a DNS-rebinding page whose Host is the attacker's name, so
+ * checking the peer address alone is not enough for the tokenless mode.
+ * @param {string} host
+ */
+function isLoopbackHost(host) {
+  if (typeof host !== 'string' || host === '') return false;
+  const name = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return name === 'localhost'
+    || name === '127.0.0.1'
+    || name === '::1'
+    || name === '::ffff:127.0.0.1'
+    || name.startsWith('127.')
+    || name.startsWith('::ffff:127.');
+}
+
+/** The unblock write accepts a JSON body only; this also defeats simple-form CSRF. */
+function isJsonContentType(req) {
+  const value = req.headers['content-type'];
+  return typeof value === 'string' && value.split(';', 1)[0].trim().toLowerCase() === 'application/json';
+}
+
+/**
+ * Reject a browser write that did not originate from this exact origin.
+ * `Origin` is absent for non-browser clients (curl, SDK), whose access is still
+ * gated by the bearer token or the loopback check.
+ */
+function isSameOriginWrite(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  const host = req.headers.host;
+  if (typeof host !== 'string' || host === '') return false;
+  return origin === `http://${host}` || origin === `https://${host}`;
 }
 
 function sendJson(res, status, body) {
@@ -274,10 +314,17 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
 
   function authorized(req) {
     if (config.gateway.token.length > 0) {
-      return req.headers.authorization === `Bearer ${config.gateway.token}`;
+      const value = req.headers.authorization;
+      if (typeof value !== 'string') return false;
+      const actual = Buffer.from(value);
+      const expected = Buffer.from(`Bearer ${config.gateway.token}`);
+      // Length is not secret, and timingSafeEqual refuses different lengths.
+      return actual.length === expected.length && timingSafeEqual(actual, expected);
     }
-    // No token configured: read-only access from loopback only.
-    return isLoopback(req.socket?.remoteAddress);
+    // No token configured: the peer and the requested Host must both be
+    // loopback. The Host check blocks DNS-rebinding pages that reach 127.0.0.1
+    // under their own name.
+    return isLoopback(req.socket?.remoteAddress) && isLoopbackHost(req.headers.host);
   }
 
   /**
@@ -357,6 +404,14 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
       }
 
       if (req.method === 'POST' && route === '/v1/unblock') {
+        if (!isJsonContentType(req)) {
+          sendJson(res, 415, { error: 'content-type must be application/json' });
+          return;
+        }
+        if (!isSameOriginWrite(req)) {
+          sendJson(res, 403, { error: 'cross-origin writes are not allowed' });
+          return;
+        }
         let body;
         try {
           body = await readJson(req);

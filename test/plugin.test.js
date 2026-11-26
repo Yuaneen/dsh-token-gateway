@@ -19,7 +19,19 @@ function mockResponse() {
 }
 
 function mockRequest({ method = 'GET', url = '/', headers = {}, remoteAddress = '127.0.0.1' } = {}) {
-  return { method, url, headers, socket: { remoteAddress } };
+  return { method, url, headers: { host: '127.0.0.1:3080', ...headers }, socket: { remoteAddress } };
+}
+
+function postRequest({ headers = {}, body = { scope: 'session', sessionId: 's1' }, remoteAddress = '127.0.0.1' } = {}) {
+  return {
+    method: 'POST',
+    url: '/token-gateway/v1/unblock',
+    headers: { host: '127.0.0.1:3080', 'content-type': 'application/json', ...headers },
+    socket: { remoteAddress },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify(body));
+    },
+  };
 }
 
 function createHost() {
@@ -167,21 +179,70 @@ test('the control API can lift a block over HTTP', async () => {
 
   const route = host.routes[0];
   const res = mockResponse();
-  await route.handler(
-    {
-      method: 'POST',
-      url: '/token-gateway/v1/unblock',
-      headers: { 'content-type': 'application/json' },
-      socket: { remoteAddress: '127.0.0.1' },
-      async *[Symbol.asyncIterator]() {
-        yield Buffer.from(JSON.stringify({ scope: 'session', sessionId: 's1' }));
-      },
-    },
-    res,
-  );
+  await route.handler(postRequest(), res);
 
   assert.equal(res.out.status, 200);
   assert.equal(JSON.parse(res.out.body).scope, 'session');
+});
+
+test('the unblock write requires a JSON content type', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(postRequest({ headers: { 'content-type': 'text/plain' } }), res);
+  assert.equal(res.out.status, 415);
+});
+
+test('the unblock write rejects a cross-origin browser request', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(postRequest({ headers: { origin: 'https://evil.example' } }), res);
+  assert.equal(res.out.status, 403);
+});
+
+test('the unblock write rejects cross-site fetch metadata', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(postRequest({ headers: { 'sec-fetch-site': 'cross-site' } }), res);
+  assert.equal(res.out.status, 403);
+});
+
+test('the unblock write accepts a same-origin browser request', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(
+    postRequest({ headers: { origin: 'http://127.0.0.1:3080', 'sec-fetch-site': 'same-origin' } }),
+    res,
+  );
+  assert.equal(res.out.status, 200);
+});
+
+test('tokenless loopback rejects a non-loopback Host', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(mockRequest({ url: '/token-gateway/v1/status', headers: { host: 'evil.example:3080' } }), res);
+  assert.equal(res.out.status, 401);
+});
+
+test('a wrong bearer token is rejected', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false }, gateway: { token: 's3cret' } });
+
+  const res = mockResponse();
+  await host.routes[0].handler(
+    mockRequest({ url: '/token-gateway/v1/status', headers: { authorization: 'Bearer wrong-token' } }),
+    res,
+  );
+  assert.equal(res.out.status, 401);
 });
 
 test('waits for bundle services that are absent at apply time', async () => {
