@@ -80,6 +80,40 @@ export class Ledger {
     this.overrides = new Map();
     /** scope -> token count at the moment the user lifted the block */
     this.tokenOverrides = new Map();
+    /**
+     * Delegated session -> its direct parent. A session budget belongs to the
+     * root conversation: subagent spend must not create an independent bucket.
+     * @type {Map<string, string>}
+     */
+    this.sessionParents = new Map();
+  }
+
+  /**
+   * Remember that a delegated session belongs to a parent conversation.
+   * @param {string} sessionId
+   * @param {string} parentSessionId
+   */
+  setSessionRoot(sessionId, parentSessionId) {
+    const id = String(sessionId || '');
+    const parent = String(parentSessionId || '');
+    if (id === '' || parent === '' || id === parent) return;
+    this.sessionParents.set(id, parent);
+  }
+
+  /**
+   * Resolve a session id to the root conversation that owns its budget.
+   * Unknown ids are their own root, so ordinary sessions are unaffected.
+   * @param {string} sessionId
+   * @returns {string}
+   */
+  rootOf(sessionId) {
+    let current = String(sessionId || '__global__');
+    const seen = new Set();
+    while (this.sessionParents.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = this.sessionParents.get(current);
+    }
+    return current;
   }
 
   /**
@@ -87,7 +121,7 @@ export class Ledger {
    * @param {{sessionId: string, provider: string, model: string, usage: object, costUsd: number, at: number}} entry
    */
   record({ sessionId, provider, model, usage, costUsd, at }) {
-    const session = String(sessionId || '__global__');
+    const session = this.rootOf(String(sessionId || '__global__'));
     const day = dayKey(at, this.timeZone);
     const month = monthKey(at, this.timeZone);
     const hour = hourKey(at, this.timeZone);
@@ -126,7 +160,7 @@ export class Ledger {
    */
   totals(sessionId, at) {
     return {
-      session: this.sessions.get(String(sessionId || '__global__'))?.spentUsd ?? 0,
+      session: this.sessions.get(this.rootOf(String(sessionId || '__global__')))?.spentUsd ?? 0,
       daily: this.days.get(dayKey(at, this.timeZone))?.spentUsd ?? 0,
       monthly: this.months.get(monthKey(at, this.timeZone))?.spentUsd ?? 0,
     };
@@ -146,7 +180,7 @@ export class Ledger {
    */
   tokenTotals(sessionId, at) {
     return {
-      session: summaryOf(this.sessions.get(String(sessionId || '__global__'))),
+      session: summaryOf(this.sessions.get(this.rootOf(String(sessionId || '__global__')))),
       daily: summaryOf(this.days.get(dayKey(at, this.timeZone))),
       monthly: summaryOf(this.months.get(monthKey(at, this.timeZone))),
     };
@@ -219,12 +253,13 @@ export class Ledger {
   }
 
   /**
-   * Session-scoped overrides are keyed by session; day/month by their billing
-   * period. Keying by period is what makes `spent <= watermark` meaningful: a
-   * watermark recorded yesterday must not lift today's cap.
+   * Session-scoped overrides are keyed by the root session; day/month by their
+   * billing period. Keying by period is what makes `spent <= watermark`
+   * meaningful: a watermark recorded yesterday must not lift today's cap, and a
+   * delegated session must not get an independent session watermark.
    */
   overrideKey(scope, sessionId, at = Date.now()) {
-    if (scope === 'session') return `session:${String(sessionId || '__global__')}`;
+    if (scope === 'session') return `session:${this.rootOf(sessionId)}`;
     const period = scope === 'daily' ? dayKey(at, this.timeZone) : monthKey(at, this.timeZone);
     return `${scope}:${period}`;
   }
@@ -277,6 +312,7 @@ export class Ledger {
       models: dump(this.models),
       overrides: Object.fromEntries(this.overrides),
       tokenOverrides: Object.fromEntries(this.tokenOverrides),
+      sessionParents: Object.fromEntries(this.sessionParents),
     };
   }
 
@@ -313,6 +349,11 @@ export class Ledger {
     loadOverrides(this.overrides, state.overrides);
     // Version 1 snapshots have no token watermarks; an absent map is fine.
     loadOverrides(this.tokenOverrides, state.tokenOverrides);
+    if (state.sessionParents !== null && typeof state.sessionParents === 'object') {
+      for (const [session, parent] of Object.entries(state.sessionParents)) {
+        this.setSessionRoot(session, parent);
+      }
+    }
     return true;
   }
 }

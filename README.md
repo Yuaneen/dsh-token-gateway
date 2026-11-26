@@ -105,6 +105,8 @@ curl -s http://127.0.0.1:49844/token-gateway/v1/status | jq .data.action
 
 `unblock` 的语义是**按当前用量打一个水位线**：用量继续增长并越过水位线后会重新拦截，避免「解一次就永久失效」。它会同时打 USD 和 token 两个水位线，所以无论哪个维度拦的都能解开。`session` 的 watermark 按会话隔离，`daily` / `monthly` 按计费周期隔离——今天解开的 daily 不会抬高明天的上限，本月解开的 monthly 也不会带进下个月（升级后旧版本遗留的、没有周期维度的 daily/monthly 水位线会被丢弃，需要时重新执行一次 `unblock`）。
 
+`session` scope 按 **delegation tree** 聚合：subagent 的花费计入它所属的根会话，子会话没有独立的 session 预算；在子会话里执行 `/gateway unblock session` 解的是根会话的水位线。升级前已经记在子会话桶里的历史花费不会自动合并。
+
 `degradation` 按**模型名**映射到更便宜的模型，例如：
 
 ```yaml
@@ -199,7 +201,7 @@ flowchart LR
 - 内置表覆盖 `deepseek-chat`、`deepseek-reasoner`、`deepseek-flash`、`deepseek-v4-flash*`、`deepseek-v4-pro`。其余模型走 `defaultPrice`；默认 `priced: false`，计 0 并在日志里告警一次。
 - 归属精度：
   - `llm/stream` 的 `usage` 是权威来源
-  - 带 `sessionId` 的调用记到该会话
+  - 带 `sessionId` 的调用记到该会话所属的根会话（subagent 归到发起它的根会话）
   - 不带 `sessionId` 的辅助调用（标题 / 压缩）回退到最近活跃会话，再回退到 `__global__`；子代理会话不会抢走这个回退归属
   - 重试的每次尝试各自计量（provider 实际计费）
 

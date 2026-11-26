@@ -344,13 +344,59 @@ test('a subagent session cannot steal the fallback attribution', () => {
   const ledger = new Ledger({ timeZone: ZONE });
   const gateway = createGateway({ config: config(), ledger, now: () => T });
 
-  gateway.onSessionEvent({ id: 'main', delegationDepth: 0 });
-  gateway.onSessionEvent({ id: 'subagent', delegationDepth: 1 });
+  gateway.onSessionEvent({ id: 'main', header: { id: 'main', delegationDepth: 0 } });
+  gateway.onSessionEvent({
+    id: 'subagent',
+    header: { id: 'subagent', parentSession: 'main', delegationDepth: 1, origin: 'subagent' },
+  });
   assert.equal(gateway.snapshot().sessionId, 'main', 'a delegated session must not claim the default');
 
-  // A session event without a depth field keeps the old behaviour.
-  gateway.onSessionEvent({ id: 'main-2' });
+  // A root session event keeps the old behaviour, with or without a depth field.
+  gateway.onSessionEvent({ id: 'main-2', header: { id: 'main-2', delegationDepth: 0 } });
   assert.equal(gateway.snapshot().sessionId, 'main-2');
+  gateway.onSessionEvent({ id: 'main-3' });
+  assert.equal(gateway.snapshot().sessionId, 'main-3');
+});
+
+test('subagent calls count toward the root session budget', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const gateway = createGateway({
+    config: config({ budgets: { session: 1, daily: null, monthly: null } }),
+    ledger,
+    now: () => T,
+  });
+
+  gateway.onSessionEvent({ id: 'root', header: { id: 'root', delegationDepth: 0 } });
+  gateway.onSessionEvent({
+    id: 'child',
+    header: { id: 'child', parentSession: 'root', delegationDepth: 1, origin: 'subagent' },
+  });
+  ledger.record({ sessionId: 'root', provider: 'p', model: 'm', usage: {}, costUsd: 1, at: T });
+
+  const chunks = await collect(
+    gateway.onLlmStream({ sessionId: 'child', provider: 'deepseek-official', model: 'deepseek-v4-pro' }, upstream),
+  );
+
+  assert.equal(chunks.at(-1).reason.failure.code, 'BUDGET_BLOCKED');
+  assert.equal(gateway.snapshot('child', T).sessionId, 'root');
+  assert.equal(ledger.totals('root', T).session, 1);
+  assert.equal(ledger.totals('child', T).session, 1);
+});
+
+test('a child /gateway unblock lifts the root session watermark', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const gateway = createGateway({ config: config(), ledger, now: () => T });
+
+  gateway.onSessionEvent({ id: 'root', header: { id: 'root', delegationDepth: 0 } });
+  gateway.onSessionEvent({
+    id: 'child',
+    header: { id: 'child', parentSession: 'root', delegationDepth: 1, origin: 'subagent' },
+  });
+  ledger.record({ sessionId: 'root', provider: 'p', model: 'm', usage: {}, costUsd: 2, at: T });
+
+  const result = gateway.handleCommand({ rawInput: 'unblock session', agent: { session: { id: 'child' } } });
+  assert.equal(result.kind, 'success');
+  assert.deepEqual(ledger.getOverrides('root', T), { session: 2 });
 });
 
 test('the status line shows a token cap only where one is configured', () => {

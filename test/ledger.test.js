@@ -91,6 +91,46 @@ test('a new period watermark replaces the previous period', () => {
   assert.deepEqual(ledger.getTokenOverrides('s1', Date.parse('2026-12-02T10:00:00+08:00')), { monthly: 200 });
 });
 
+test('delegated session spend aggregates to the root session', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.setSessionRoot('child', 'root');
+  ledger.setSessionRoot('grand', 'child');
+  ledger.record({ sessionId: 'grand', provider: 'p', model: 'm', usage: usage(), costUsd: 2, at: T });
+
+  assert.equal(ledger.rootOf('grand'), 'root');
+  assert.equal(ledger.totals('root', T).session, 2);
+  // Asking for a delegated session reads the root bucket: there is no
+  // independent child session budget.
+  assert.equal(ledger.totals('child', T).session, 2);
+  assert.equal(ledger.totals('grand', T).session, 2);
+  assert.equal(ledger.tokenTotals('root', T).session.totalTokens, 1_100);
+});
+
+test('session watermarks resolve through the delegated root', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.setSessionRoot('child', 'root');
+  ledger.setSessionRoot('grand', 'child');
+
+  ledger.setOverride('session', 2, 'grand');
+  assert.deepEqual(ledger.getOverrides('root', T), { session: 2 });
+  assert.deepEqual(ledger.getOverrides('grand', T), { session: 2 });
+
+  ledger.clearOverride('session', 'child');
+  assert.deepEqual(ledger.getOverrides('root', T), {});
+});
+
+test('serialize/restore round-trips session roots', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.setSessionRoot('child', 'root');
+  ledger.setSessionRoot('grand', 'child');
+
+  const restored = new Ledger({ timeZone: ZONE });
+  assert.equal(restored.restore(ledger.serialize()), true);
+  restored.record({ sessionId: 'grand', provider: 'p', model: 'm', usage: usage(), costUsd: 1, at: T });
+  assert.equal(restored.totals('root', T).session, 1);
+  assert.equal(restored.rootOf('grand'), 'root');
+});
+
 test('serialize/restore round-trips all buckets', () => {
   const ledger = new Ledger({ timeZone: ZONE });
   ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: usage(10, 20), costUsd: 0.5, at: T });
