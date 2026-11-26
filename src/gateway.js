@@ -18,7 +18,7 @@
 
 import { costOf, formatMoney, formatTokens, priceForModel } from './pricing.js';
 import { SCOPES, budgetRatios, evaluateBudget, formatTokenCount, tokenRatios } from './policy.js';
-import { blockedStream, meteredStream } from './stream.js';
+import { blockedFailure, blockedStream, meteredStream } from './stream.js';
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', '::ffff:7f00:1']);
 
@@ -139,6 +139,29 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
   }
 
   /**
+   * Whether this provider's retry executor would retry the block's own error
+   * finish. `always` retries every failure; a normal policy can also opt into
+   * `BUDGET_BLOCKED` explicitly. Those routes get a thrown terminal failure
+   * instead of a finish, because the retry executor would re-enqueue a finish
+   * forever and keep the same blocked step alive.
+   * @param {string} provider
+   * @returns {boolean}
+   */
+  function retriesBlocked(provider) {
+    try {
+      const policy = llm?.providerRetryPolicy?.(provider);
+      if (policy?.mode === 'always') return true;
+      return policy?.mode === 'normal'
+        && Array.isArray(policy.retryableCodes)
+        && policy.retryableCodes.includes('BUDGET_BLOCKED');
+    } catch {
+      // An unregistered provider or an older host without the query keeps the
+      // ordinary stream shape; admission still blocks the call.
+      return false;
+    }
+  }
+
+  /**
    * `llm/stream` waterfall listener.
    * @param {object} options GenerateOptions
    * @param {() => AsyncIterable<object>} next
@@ -158,14 +181,15 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
 
     if (decision.action === 'block') {
       log.warn(`blocked ${options.provider}/${options.model}: ${decision.reason}`);
-      return blockedStream(
-        `Token Gateway blocked this request: ${decision.reason}. Lift it with "/gateway unblock ${decision.scope}".`,
-      );
+      const message = `Token Gateway blocked this request: ${decision.reason}. Lift it with "/gateway unblock ${decision.scope}".`;
+      return retriesBlocked(options.provider) ? blockedFailure(message) : blockedStream(message);
     }
 
     if (decision.action === 'degrade' && decision.targetModel) {
       if (llm === undefined || typeof llm.stream !== 'function') {
-        return blockedStream(`Token Gateway: degrade requested but no LLM service is available (${decision.reason}).`);
+        // Without the LLM service this cannot be retried at all; make the
+        // failure terminal rather than a finish that always-mode would retry.
+        return blockedFailure(`Token Gateway: degrade requested but no LLM service is available (${decision.reason}).`);
       }
       const copy = { ...options, model: decision.targetModel };
       rewritten.add(copy);

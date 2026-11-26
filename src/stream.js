@@ -1,9 +1,15 @@
 /**
  * Stream shapes used at the `llm/stream` waterfall.
  *
- * A blocked call must still look like a normal assistant stream so the agent
- * loop settles the step instead of retrying a transport failure: one text
- * block carrying the refusal, then an `error` finish with a stable code.
+ * A block has two shapes because the host has two retry postures:
+ *   - ordinary retry policies get a normal assistant stream (one text block
+ *     carrying the refusal, then an `error` finish with a stable code) so the
+ *     loop settles the step and the user sees why;
+ *   - a policy that retries every failure (`retryPolicy.mode: always`) would
+ *     re-enqueue that error finish forever, so it gets a thrown failure before
+ *     the first chunk. The agent loop treats a middleware throw as a failed
+ *     turn and never dispatches `agent/request-error`, so the retry executor
+ *     cannot loop on a budget block.
  */
 
 /**
@@ -17,6 +23,24 @@ export function blockedStream(message, code = 'BUDGET_BLOCKED') {
     yield { type: 'text-delta', index: 0, text: message };
     yield { type: 'block-end', index: 0, block: { type: 'text', text: message } };
     yield { type: 'finish', reason: { kind: 'error', failure: { message, code } } };
+  })();
+}
+
+/**
+ * A terminal block for a provider whose retry executor would retry an error
+ * finish. Throwing before the first chunk is what keeps the failure out of the
+ * `finish` / `agent/request-error` path; the message still carries the reason.
+ *
+ * @param {string} message user-facing refusal
+ * @param {string} [code] stable machine code
+ * @returns {AsyncIterable<never>}
+ */
+export function blockedFailure(message, code = 'BUDGET_BLOCKED') {
+  return (async function* blocked() {
+    const error = new Error(message);
+    error.name = 'BudgetBlockedError';
+    error.code = code;
+    throw error;
   })();
 }
 
