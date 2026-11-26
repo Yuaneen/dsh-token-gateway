@@ -44,20 +44,25 @@
           decimals: 3
 
         pricing:
-          # USD per 1M tokens, merged over the built-in snapshot.
+          # USD per 1M tokens. Entries merge over the built-in snapshot, so a
+          # partial override keeps the published cache rates; only models with
+          # no built-in entry fall back to the override's input rate for cache.
           # Example: { "deepseek-v4-pro": { input: 1.25, output: 3.75 } }
           prices: {}
-          # Off-peak is half price in the two Beijing working-hour windows.
+          # The two Beijing working-hour windows are peak; everything outside
+          # (including weekends/holidays) is off-peak and half price.
           peak:
             enabled: true
             timeZone: Asia/Shanghai
             offPeakMultiplier: 0.5
 
         gateway:
-          # Read-only control API at /token-gateway/v1/status and /v1/usage.
+          # Control API at /token-gateway/v1/* (GET reads + POST unblock), plus a
+          # fixed /_dsh-token-gateway/config bootstrap for the in-composer panel.
           http: true
           basePath: /token-gateway
           # Set a bearer token before exposing the web host beyond loopback.
+          # The panel asks for this token once and keeps it in the browser.
           token: ''
 
         persistence:

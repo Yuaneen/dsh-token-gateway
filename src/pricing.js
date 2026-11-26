@@ -94,14 +94,18 @@ export function isPeak(at, peak) {
 
 function pickTable(pricing, provider, model) {
   const overrides = pricing.prices;
+  // An override merges over the built-in entry of the same model, so a table
+  // that only restates input/output keeps the published cache rates instead of
+  // silently falling back to the (much higher) input rate for cached tokens.
+  const builtin = Object.prototype.hasOwnProperty.call(BUILTIN_PRICES, model) ? BUILTIN_PRICES[model] : undefined;
   const keys = [`${provider}/${model}`, model];
   for (const key of keys) {
     if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      return { ...overrides[key], source: 'override' };
+      return { ...(builtin ?? {}), ...overrides[key], source: 'override' };
     }
   }
-  if (Object.prototype.hasOwnProperty.call(BUILTIN_PRICES, model)) {
-    return { ...BUILTIN_PRICES[model], source: 'builtin' };
+  if (builtin !== undefined) {
+    return { ...builtin, source: 'builtin' };
   }
   return { ...pricing.defaultPrice, source: 'default' };
 }

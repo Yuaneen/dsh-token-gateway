@@ -25,11 +25,14 @@ window.__ModuleLoader__.load({
   id: 'dsh-token-gateway',
   factory(require) {
     const React = require('react');
+    const { createPortal } = require('react-dom');
     const h = React.createElement;
 
     /** Locale namespace owned by this plugin. */
     const NS = 'dsh-token-gateway';
-    const ENDPOINT = '/token-gateway/v1/stats';
+    /** Fixed host route the panel reads before it knows `basePath`. */
+    const BOOTSTRAP_PATH = '/_dsh-token-gateway/config';
+    const DEFAULT_BASE_PATH = '/token-gateway';
     const POLL_MS = 5_000;
     const STYLE_ID = 'dsh-token-gateway/style';
     const SCOPES = ['session', 'daily', 'monthly'];
@@ -60,6 +63,14 @@ window.__ModuleLoader__.load({
       'card.byModel': '按模型',
       'card.loading': '读取中…',
       'card.offline': '控制面不可用',
+      'card.tokenRequired': '需要访问令牌',
+      'card.tokenTitle': '访问令牌',
+      'card.tokenHint': '控制面要求 token。粘贴 profile 里的 gateway.token 后读取用量。',
+      'card.tokenPlaceholder': 'Bearer token',
+      'card.tokenSave': '保存',
+      'card.tokenClear': '清除',
+      'card.tokenInvalid': 'token 无效，请重试',
+      'card.tokenNote': '只保存在此浏览器。',
       'card.none': '还没有计量到调用',
       'card.noCap': '未设限额',
       'tone.ok': '正常',
@@ -93,6 +104,14 @@ window.__ModuleLoader__.load({
       'card.byModel': 'By model',
       'card.loading': 'Loading…',
       'card.offline': 'Control plane unavailable',
+      'card.tokenRequired': 'Token required',
+      'card.tokenTitle': 'Access token',
+      'card.tokenHint': 'The control plane requires a token. Paste gateway.token to read usage.',
+      'card.tokenPlaceholder': 'Bearer token',
+      'card.tokenSave': 'Save',
+      'card.tokenClear': 'Clear',
+      'card.tokenInvalid': 'Invalid token, try again',
+      'card.tokenNote': 'Stored in this browser only.',
       'card.none': 'no metered calls yet',
       'card.noCap': 'no cap',
       'tone.ok': 'normal',
@@ -199,6 +218,31 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The control-plane bearer token. It is never shipped in the page: the
+     * reader pastes it once and it stays in this browser's localStorage.
+     */
+    const TOKEN_KEY = 'dsh-token-gateway:token';
+
+    function readToken() {
+      try {
+        const value = typeof localStorage === 'object' && localStorage !== null ? localStorage.getItem(TOKEN_KEY) : null;
+        return typeof value === 'string' ? value : '';
+      } catch {
+        return '';
+      }
+    }
+
+    function writeToken(value) {
+      try {
+        if (typeof localStorage !== 'object' || localStorage === null) return;
+        if (value === '') localStorage.removeItem(TOKEN_KEY);
+        else localStorage.setItem(TOKEN_KEY, value);
+      } catch {
+        /* private mode: the token still works for this page */
+      }
+    }
+
     /** Every scope entry of one unit that actually has a cap. */
     function entriesOf(data, unit) {
       const out = [];
@@ -237,25 +281,83 @@ window.__ModuleLoader__.load({
 
     /* -------------------------------------------------------------- fetching */
 
-    function useStats() {
-      const [state, setState] = React.useState({ data: null, error: null });
+    /**
+     * The panel must discover the configured mount point before it can call the
+     * control plane, and learn whether a bearer token is required. The host
+     * serves this on a fixed path so changing `gateway.basePath` cannot strand
+     * the panel; the payload contains neither spend nor credentials.
+     */
+    async function readConfig() {
+      const response = await fetch(BOOTSTRAP_PATH, { headers: { accept: 'application/json' }, cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      const data = body?.data ?? {};
+      return {
+        basePath: typeof data.basePath === 'string' && data.basePath.startsWith('/') ? data.basePath : DEFAULT_BASE_PATH,
+        auth: data.auth === 'bearer' ? 'bearer' : 'none',
+      };
+    }
+
+    function useStats(sessionId, token) {
+      const [state, setState] = React.useState({ data: null, error: null, needsToken: false, invalid: false });
+      const aliveRef = React.useRef(true);
+      const configRef = React.useRef(null);
+      const sessionRef = React.useRef(sessionId);
+      const tokenRef = React.useRef(token);
+      sessionRef.current = sessionId;
+      tokenRef.current = token;
+
+      const apply = (next) => {
+        if (aliveRef.current) setState(next);
+      };
+
+      const load = async (overrideToken) => {
+        const activeToken = overrideToken === undefined ? tokenRef.current : overrideToken;
+        try {
+          let config = configRef.current;
+          if (config === null) {
+            config = await readConfig();
+            configRef.current = config;
+          }
+          if (config.auth === 'bearer' && activeToken === '') {
+            apply({ data: null, error: null, needsToken: true, invalid: false });
+            return;
+          }
+          const session = sessionRef.current;
+          const suffix = typeof session === 'string' && session !== ''
+            ? `?hours=24&session=${encodeURIComponent(session)}`
+            : '?hours=24';
+          const headers = { accept: 'application/json' };
+          if (config.auth === 'bearer') headers.authorization = `Bearer ${activeToken}`;
+          const response = await fetch(`${config.basePath}/v1/stats${suffix}`, { headers, cache: 'no-store' });
+          if (response.status === 401) {
+            if (config.auth === 'bearer') {
+              apply({ data: null, error: null, needsToken: true, invalid: activeToken !== '' });
+            } else {
+              // Without a configured token the control plane is loopback-only;
+              // asking for a token here would suggest one could help.
+              apply({ data: null, error: 'unauthorized', needsToken: false, invalid: false });
+            }
+            return;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          apply({ data: body.data, error: null, needsToken: false, invalid: false });
+        } catch (error) {
+          // Keep the last good snapshot on screen; surface the failure instead
+          // of blanking the capsule.
+          if (!aliveRef.current) return;
+          setState((previous) => ({
+            data: previous.data,
+            error: String(error?.message ?? error),
+            needsToken: false,
+            invalid: false,
+          }));
+        }
+      };
 
       React.useEffect(() => {
-        let alive = true;
-        const load = async () => {
-          try {
-            const response = await fetch(`${ENDPOINT}?hours=24`, { headers: { accept: 'application/json' } });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const body = await response.json();
-            if (!alive) return;
-            setState({ data: body.data, error: null });
-          } catch (error) {
-            if (!alive) return;
-            // Keep the last good snapshot on screen; surface the failure instead
-            // of blanking the capsule.
-            setState((previous) => ({ data: previous.data, error: String(error?.message ?? error) }));
-          }
-        };
+        aliveRef.current = true;
         load();
         const timer = setInterval(load, POLL_MS);
         const onVisibility = () => {
@@ -263,13 +365,13 @@ window.__ModuleLoader__.load({
         };
         document.addEventListener('visibilitychange', onVisibility);
         return () => {
-          alive = false;
+          aliveRef.current = false;
           clearInterval(timer);
           document.removeEventListener('visibilitychange', onVisibility);
         };
       }, []);
 
-      return state;
+      return { ...state, refresh: (next) => load(next) };
     }
 
     /* ------------------------------------------------------------ components */
@@ -379,7 +481,7 @@ window.__ModuleLoader__.load({
 
       return h(
         'div',
-        { className: 'tg-card', role: 'dialog', 'aria-label': t('card.title'), 'data-menu-material': '' },
+        { className: 'tg-card', role: 'dialog', 'aria-label': t('card.title'), 'data-tone': tone, 'data-menu-material': '' },
         h(
           'header',
           { className: 'tg-head' },
@@ -472,6 +574,68 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The token gate is what the chip opens when the control plane is protected
+     * but this browser has no stored token. The token never comes from the host
+     * page: the reader pastes the same value as `gateway.token`.
+     */
+    function TokenGate({ t, value, invalid, hasToken, onChange, onSave, onClear, onClose }) {
+      const submit = () => {
+        const next = value.trim();
+        if (next !== '') onSave(next);
+      };
+
+      return h(
+        'div',
+        {
+          className: 'tg-card tg-token-card',
+          role: 'dialog',
+          'aria-label': t('card.tokenTitle'),
+          'data-tone': 'ok',
+          'data-menu-material': '',
+        },
+        h(
+          'header',
+          { className: 'tg-head' },
+          h('span', { className: 'tg-title' }, t('card.tokenTitle')),
+          h(
+            'button',
+            { type: 'button', className: 'tg-icon-btn', 'aria-label': t('card.close'), title: t('card.close'), onClick: onClose },
+            '✕',
+          ),
+        ),
+        h('p', { className: 'tg-token-hint' }, t('card.tokenHint')),
+        h('input', {
+          className: 'tg-token-input',
+          type: 'password',
+          value,
+          placeholder: t('card.tokenPlaceholder'),
+          'aria-label': t('card.tokenPlaceholder'),
+          autoComplete: 'off',
+          spellCheck: false,
+          'aria-invalid': invalid ? 'true' : undefined,
+          onChange: (event) => onChange(event.target.value),
+          onKeyDown: (event) => {
+            if (event.key === 'Enter') submit();
+          },
+        }),
+        invalid ? h('div', { className: 'tg-token-error', role: 'alert' }, t('card.tokenInvalid')) : null,
+        h(
+          'div',
+          { className: 'tg-token-actions' },
+          h(
+            'button',
+            { type: 'button', className: 'tg-token-save', disabled: value.trim() === '', onClick: submit },
+            t('card.tokenSave'),
+          ),
+          hasToken
+            ? h('button', { type: 'button', className: 'tg-token-clear', onClick: onClear }, t('card.tokenClear'))
+            : null,
+        ),
+        h('div', { className: 'tg-token-note' }, t('card.tokenNote')),
+      );
+    }
+
+    /**
      * The dock chip. `conversation.composer.dock` is the row under the composer
      * where the host itself renders its activity and usage pills, so joining it
      * with a higher `order` puts this chip inline with them: same line, same
@@ -479,14 +643,30 @@ window.__ModuleLoader__.load({
      */
     function DockChip(props) {
       const t = typeof props?.t === 'function' ? props.t : fallbackT;
-      const { data, error } = useStats();
+      const sessionId = typeof props?.sessionId === 'string' ? props.sessionId : undefined;
+      // The slot supplies the Session identity; reading the server's
+      // `lastSessionId` fallback would paint another Session after a switch.
+      const [token, setToken] = React.useState(() => readToken());
+      const { data, error, needsToken, invalid, refresh } = useStats(sessionId, token);
       const [open, setOpen] = React.useState(false);
+      const [tokenDraft, setTokenDraft] = React.useState('');
       // Money by default: it is the unit a bill arrives in. The toggle below
       // remembers whatever the reader picks.
       const [unit, setUnit] = React.useState(() => readUnit() ?? 'usd');
       const chooseUnit = (value) => {
         setUnit(value);
         writeUnit(value);
+      };
+      const chooseToken = (value) => {
+        setToken(value);
+        writeToken(value);
+        void refresh(value);
+      };
+      const clearToken = () => {
+        setToken('');
+        setTokenDraft('');
+        writeToken('');
+        void refresh('');
       };
       const [anchor, setAnchor] = React.useState(null);
       const chipRef = React.useRef(null);
@@ -495,15 +675,14 @@ window.__ModuleLoader__.load({
       openRef.current = open;
 
       /**
-       * Whether a pointer landed inside this widget. The popover is a *sibling*
-       * of the chip (it has to be, to escape the dock row's clipping), so
-       * containment must be judged against the wrapper that holds both —
-       * checking the chip alone would treat every click inside the card as
-       * "outside" and dismiss it before the click could land.
+       * Whether a pointer landed inside this widget. The popover portals to the
+       * document body (the docked composer is the containing block for fixed
+       * descendants), so containment must accept either the chip's dock wrapper
+       * or the portaled card.
        */
       const insideOf = (target) => {
         if (target !== null && target !== undefined && typeof target.closest === 'function') {
-          return target.closest('.tg-dock') !== null;
+          return target.closest('.tg-dock, .tg-card') !== null;
         }
         const node = rootRef.current;
         return node !== null && node !== undefined && typeof node.contains === 'function' && node.contains(target);
@@ -532,9 +711,10 @@ window.__ModuleLoader__.load({
       const values = binding === null || data === null ? null : bindingValues(binding, data.currency);
 
       /**
-       * Anchor the popover to the chip. The dock row may clip its overflow, so the
-       * card is `position: fixed` and positioned from the measured rect rather
-       * than being a child of the chip's flow.
+       * Anchor the popover to the chip. The docked composer is the containing
+       * block for `position: fixed` descendants (it carries `will-change:
+       * transform`), so the card portals to `document.body` and is positioned
+       * from the measured viewport rect instead of the dock's flow.
        */
       const toggle = () => {
         const node = chipRef.current;
@@ -550,8 +730,17 @@ window.__ModuleLoader__.load({
         setOpen((value) => !value);
       };
 
+      /** Portal the card to the document body; fall back to inline if unavailable. */
+      const withPortal = (content) => {
+        const body = typeof document === 'object' && document !== null ? document.body : undefined;
+        const style = { right: `${anchor?.right ?? 16}px`, bottom: `${anchor?.bottom ?? 72}px` };
+        return body === undefined
+          ? h('div', { className: 'tg-pop', style }, content)
+          : createPortal(h('div', { className: 'tg-pop', style }, content), body);
+      };
+
       const label = data === null
-        ? (error === null ? t('card.loading') : t('card.offline'))
+        ? (needsToken ? t('card.tokenRequired') : error === null ? t('card.loading') : t('card.offline'))
         : values === null
           ? t('card.noCap')
           : `${values.spend} / ${values.limit}`;
@@ -565,20 +754,29 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'tg-chip',
             ref: chipRef,
-            title: data === null ? t('pill.open') : `${t('pill.open')} · ${data.sessionId}`,
+            title: needsToken ? t('card.tokenRequired') : data === null ? t('pill.open') : `${t('pill.open')} · ${data.sessionId}`,
             'aria-expanded': open,
-            'aria-label': t('pill.open'),
+            'aria-label': needsToken ? t('card.tokenRequired') : t('pill.open'),
             onClick: toggle,
           },
           h('span', { className: 'tg-chip-dot' }),
           h('span', { className: 'tg-chip-text' }, label),
           binding === null ? null : h('span', { className: 'tg-chip-pct' }, formatPercent(binding.ratio)),
         ),
-        open && data !== null
-          ? h(
-            'div',
-            { className: 'tg-pop', style: { right: `${anchor?.right ?? 16}px`, bottom: `${anchor?.bottom ?? 72}px` } },
-            h(Popover, { t, data, peak: isPeakNow(), onClose: () => setOpen(false), unit, onUnit: chooseUnit }),
+        open && (data !== null || needsToken)
+          ? withPortal(
+            data !== null
+              ? h(Popover, { t, data, peak: isPeakNow(), onClose: () => setOpen(false), unit, onUnit: chooseUnit })
+              : h(TokenGate, {
+                t,
+                value: tokenDraft,
+                invalid,
+                hasToken: token !== '',
+                onChange: setTokenDraft,
+                onSave: chooseToken,
+                onClear: clearToken,
+                onClose: () => setOpen(false),
+              }),
           )
           : null,
       );
@@ -618,7 +816,14 @@ window.__ModuleLoader__.load({
   font-size: var(--dsw-font-xxs-12-font-size, 12px);
   line-height: inherit;
   color: var(--dsw-alias-label-tertiary, rgba(24, 24, 27, 0.45));
+}
 
+/*
+ * The popover portals to <body>, outside the dock's subtree, so the design
+ * tokens live on both roots. Only custom properties are shared; .tg-dock keeps
+ * its inline-flex layout and .tg-card keeps its own box.
+ */
+.tg-dock, .tg-card {
   --tg-tone: var(--dsw-alias-state-success-primary, #16a34a);
   --tg-cat-cache: var(--dsw-static-green-500, #059669);
   --tg-cat-fresh: var(--dsw-static-blue-500, #2563eb);
@@ -637,8 +842,8 @@ window.__ModuleLoader__.load({
   --tg-focus: var(--dsw-focus-ring-color, #2563eb);
   --tg-focus-width: var(--dsw-focus-ring-width, 2px);
 }
-.tg-dock[data-tone="warn"] { --tg-tone: var(--dsw-alias-state-warn-primary, #d97706); }
-.tg-dock[data-tone="over"] { --tg-tone: var(--dsw-alias-state-error-primary, #dc2626); }
+.tg-dock[data-tone="warn"], .tg-card[data-tone="warn"] { --tg-tone: var(--dsw-alias-state-warn-primary, #d97706); }
+.tg-dock[data-tone="over"], .tg-card[data-tone="over"] { --tg-tone: var(--dsw-alias-state-error-primary, #dc2626); }
 
 .tg-chip {
   display: inline-flex; align-items: center; gap: 5px;
@@ -663,6 +868,25 @@ window.__ModuleLoader__.load({
 
 .tg-pop { position: fixed; z-index: 70; }
 
+/* Hero ring: a conic gauge driven by the registered --tg-ratio custom property,
+   so a new reading animates instead of jumping. The inner disc masks the centre
+   with the card surface, leaving a stroke of --tg-stroke. */
+.tg-ring {
+  flex: none;
+  display: inline-block;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background:
+    radial-gradient(
+      closest-side,
+      var(--tg-surface) calc(100% - var(--tg-stroke, 3px)),
+      transparent calc(100% - var(--tg-stroke, 3px) + 0.5px)
+    ),
+    conic-gradient(var(--tg-tone) calc(var(--tg-ratio, 0) * 1turn), var(--tg-track) 0);
+  transition: --tg-ratio 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tg-ring[data-size="lg"] { width: 44px; height: 44px; }
+
 /* -------------------------------------------------------------- popover --- */
 .tg-card {
   pointer-events: auto;
@@ -676,6 +900,9 @@ window.__ModuleLoader__.load({
   -webkit-backdrop-filter: var(--tg-blur);
   backdrop-filter: var(--tg-blur);
   box-shadow: var(--tg-card-shadow);
+  color: var(--dsw-alias-label-primary, #18181b);
+  font-family: inherit;
+  font-size: var(--dsw-font-xxs-12-font-size, 12px);
   transform-origin: 100% 100%;
   transition: opacity 170ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -831,11 +1058,55 @@ window.__ModuleLoader__.load({
   word-break: break-all;
 }
 
+/* ----------------------------------------------------------- token gate --- */
+.tg-token-card { width: min(300px, calc(100vw - 28px)); }
+.tg-token-hint {
+  margin: 0 0 10px;
+  font-size: var(--dsw-font-xxs-12-font-size, 12px);
+  line-height: 1.5;
+  color: var(--tg-muted);
+}
+.tg-token-input {
+  box-sizing: border-box; width: 100%;
+  padding: 7px 9px;
+  border: var(--tg-hairline) solid var(--tg-border);
+  border-radius: var(--tg-radius-cell);
+  background: var(--dsw-alias-bg-layer-1, #fff);
+  color: var(--dsw-alias-label-primary, #18181b);
+  font: inherit;
+  font-size: var(--dsw-font-xxs-12-font-size, 12px);
+}
+.tg-token-input:focus-visible { outline: var(--tg-focus-width) solid var(--tg-focus); outline-offset: 1px; }
+.tg-token-error {
+  margin-top: 7px;
+  font-size: var(--dsw-font-xxxs-11-font-size, 11px);
+  color: var(--dsw-alias-state-error-primary, #dc2626);
+}
+.tg-token-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.tg-token-save, .tg-token-clear {
+  border: 0; border-radius: var(--tg-radius-cell);
+  padding: 5px 10px; font: inherit;
+  font-size: var(--dsw-font-xxs-12-font-size, 12px);
+  cursor: pointer;
+}
+.tg-token-save {
+  background: var(--dsw-alias-label-primary, #18181b);
+  color: var(--dsw-alias-bg-layer-1, #fff);
+}
+.tg-token-save:disabled { opacity: 0.4; cursor: default; }
+.tg-token-clear { padding-inline: 4px; background: transparent; color: var(--tg-muted); }
+.tg-token-clear:hover { color: var(--dsw-alias-label-primary, #18181b); }
+.tg-token-save:focus-visible, .tg-token-clear:focus-visible {
+  outline: var(--tg-focus-width) solid var(--tg-focus); outline-offset: 1px;
+}
+.tg-token-note { margin-top: 9px; font-size: var(--dsw-font-xxxs-11-font-size, 11px); color: var(--tg-muted); }
+
 @media (max-width: 380px) { .tg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) {
   .tg-chip, .tg-stack-seg { transition: none; }
   .tg-card { transition: none; }
   .tg-card { opacity: 1; transform: none; }
+  .tg-ring { transition: none; }
 }
 `;
 

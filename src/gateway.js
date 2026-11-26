@@ -12,7 +12,8 @@
  *
  * Control plane
  *   `/gateway` command (in-session) + `GET/POST {basePath}/v1/*` on the DSH
- *   web host (read-only by default, loopback-gated when no token is set).
+ *   web host, with a fixed-path client bootstrap. Reads are loopback-gated
+ *   when no token is set; the only write is the idempotent `unblock`.
  */
 
 import { costOf, formatMoney, formatTokens, priceForModel } from './pricing.js';
@@ -20,6 +21,13 @@ import { SCOPES, budgetRatios, evaluateBudget, formatTokenCount, tokenRatios } f
 import { blockedStream, meteredStream } from './stream.js';
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1', '::ffff:7f00:1']);
+
+/**
+ * Fixed path the client bundle reads before it knows `basePath`.
+ * Kept outside `gateway.basePath` so changing the mount point cannot strand the
+ * panel: the payload is only the mount point and whether a token is required.
+ */
+export const BOOTSTRAP_PATH = '/_dsh-token-gateway/config';
 
 function isLoopback(address) {
   if (typeof address !== 'string') return false;
@@ -91,8 +99,8 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
       degradeAt: config.degradeAt,
       degradation: config.degradation,
       model: typeof options?.model === 'string' ? options.model : '',
-      overrides: ledger.getOverrides(sessionId),
-      tokenOverrides: ledger.getTokenOverrides(sessionId),
+      overrides: ledger.getOverrides(sessionId, at),
+      tokenOverrides: ledger.getTokenOverrides(sessionId, at),
     });
   }
 
@@ -192,8 +200,8 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
   function snapshot(sessionId = state.lastSessionId ?? '__global__', at = now()) {
     const totals = ledger.totals(sessionId, at);
     const tokenTotals = ledger.tokenTotals(sessionId, at);
-    const overrides = ledger.getOverrides(sessionId);
-    const tokenOverrides = ledger.getTokenOverrides(sessionId);
+    const overrides = ledger.getOverrides(sessionId, at);
+    const tokenOverrides = ledger.getTokenOverrides(sessionId, at);
     const decision = evaluateBudget({
       totals,
       tokenTotals,
@@ -240,6 +248,25 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
     }
     // No token configured: read-only access from loopback only.
     return isLoopback(req.socket?.remoteAddress);
+  }
+
+  /**
+   * Public client bootstrap: the panel must learn `basePath` before it can call
+   * the control plane, and whether it needs an access token. This exposes no
+   * spend, budget, session or credential data.
+   */
+  function handleBootstrap(req, res) {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      data: {
+        basePath: config.gateway.basePath,
+        auth: config.gateway.token.length > 0 ? 'bearer' : 'none',
+      },
+    });
   }
 
   /** Raw HTTP handler registered at `basePath`. */
@@ -316,8 +343,8 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
         const id = typeof body.sessionId === 'string' ? body.sessionId : state.lastSessionId ?? '__global__';
         const spent = ledger.spentFor(scope, id, at);
         const tokens = ledger.tokenTotals(id, at)[scope]?.totalTokens ?? 0;
-        ledger.setOverride(scope, spent, id);
-        ledger.setTokenOverride(scope, tokens, id);
+        ledger.setOverride(scope, spent, id, at);
+        ledger.setTokenOverride(scope, tokens, id, at);
         persist?.markDirty();
         sendJson(res, 200, {
           ok: true,
@@ -358,8 +385,8 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
       }
       const spent = ledger.spentFor(scope, sessionId, at);
       const tokens = ledger.tokenTotals(sessionId, at)[scope]?.totalTokens ?? 0;
-      ledger.setOverride(scope, spent, sessionId);
-      ledger.setTokenOverride(scope, tokens, sessionId);
+      ledger.setOverride(scope, spent, sessionId, at);
+      ledger.setTokenOverride(scope, tokens, sessionId, at);
       persist?.markDirty();
       return {
         kind: 'success',
@@ -374,7 +401,7 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
     return { kind: 'error', text: `unknown subcommand "${sub}". Try /gateway help.` };
   }
 
-  return { onLlmStream, onSessionEvent, snapshot, handleHttp, handleCommand };
+  return { onLlmStream, onSessionEvent, snapshot, handleHttp, handleBootstrap, handleCommand };
 }
 
 function line(label, scope, snapshot) {

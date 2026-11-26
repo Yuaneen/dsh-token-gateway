@@ -207,6 +207,29 @@ test('command unblock lifts the block until spending grows', () => {
   assert.equal(ledger.overrides.get('session:s1'), 11);
 });
 
+test('a daily unblock does not lift the next day cap', async () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const tomorrow = Date.parse('2026-11-17T10:00:00+08:00');
+  let now = T;
+  const gateway = createGateway({
+    config: config({ budgets: { session: null, daily: 10, monthly: null } }),
+    ledger,
+    now: () => now,
+  });
+
+  ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 12, at: T });
+  const lifted = gateway.handleCommand({ rawInput: 'unblock daily', agent: { session: { id: 's1' } } });
+  assert.equal(lifted.kind, 'success');
+
+  now = tomorrow;
+  ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: {}, costUsd: 11, at: tomorrow });
+  const chunks = await collect(
+    gateway.onLlmStream({ sessionId: 's1', provider: 'p', model: 'm' }, upstream),
+  );
+
+  assert.equal(chunks.at(-1).reason.failure.code, 'BUDGET_BLOCKED');
+});
+
 test('invalid config fails loudly', () => {
   assert.throws(() => resolveConfig({ budgets: { session: -1 } }), /budgets\.session/);
   assert.throws(() => resolveConfig({ overLimit: 'nope' }), /overLimit/);

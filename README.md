@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="License: MIT"></a>
-  <a href="test/"><img src="https://img.shields.io/badge/tests-63%20passing-22c55e?style=flat-square" alt="63 tests passing"></a>
+  <a href="test/"><img src="https://img.shields.io/badge/tests-72%20passing-22c55e?style=flat-square" alt="72 tests passing"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/node-%E2%89%A522.19-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node >= 22.19"></a>
   <a href="package.json"><img src="https://img.shields.io/badge/DSH-0.2.2--rc.1-4f6bed?style=flat-square" alt="DSH 0.2.2-rc.1"></a>
   <a href="#贡献"><img src="https://img.shields.io/badge/PRs-welcome-ec4899?style=flat-square" alt="PRs welcome"></a>
@@ -76,7 +76,9 @@ cd dsh-token-gateway
 dsh plugin --profile web add .
 ```
 
-默认配置开箱即用：会话 `$2`、当日 `$10`、当月 `$100`（USD），超限 `block`，只读控制面仅回环可访问。想改就编辑 profile 的 `cordis.patch.yml` 里 `id: token-gateway` 那条的 `config`——插件行是热重载的，**保存即生效，不用重启**。
+默认配置开箱即用：会话 `$2`、当日 `$10`、当月 `$100`（USD），超限 `block`，控制面仅回环可访问。想改就编辑 profile 的 `cordis.patch.yml` 里 `id: token-gateway` 那条的 `config`——插件行是热重载的，**保存即生效，不用重启**。
+
+面板会从固定路径自动发现 `gateway.basePath`，所以改挂载点不会让面板失联。如果设置了 `gateway.token`，首次打开面板粘贴同一个 token 即可；它只保存在当前浏览器的 `localStorage`，不会由 Host 注入页面。
 
 验证控制面（端口换成你自己的 `dsh web` 端口）：
 
@@ -101,7 +103,7 @@ curl -s http://127.0.0.1:49844/token-gateway/v1/status | jq .data.action
 | 任一 scope ≥ cap | warn（`over: true`） | block | 存在映射 → degrade；否则 block |
 | 用户执行 `unblock <scope>` | 记录 watermark | 在 watermark 之前不再 block | 同 block |
 
-`unblock` 的语义是**按当前用量打一个水位线**：用量继续增长并越过水位线后会重新拦截，避免「解一次就永久失效」。它会同时打 USD 和 token 两个水位线，所以无论哪个维度拦的都能解开。`session` 的 watermark 按会话隔离，`daily` / `monthly` 是全局的。
+`unblock` 的语义是**按当前用量打一个水位线**：用量继续增长并越过水位线后会重新拦截，避免「解一次就永久失效」。它会同时打 USD 和 token 两个水位线，所以无论哪个维度拦的都能解开。`session` 的 watermark 按会话隔离，`daily` / `monthly` 按计费周期隔离——今天解开的 daily 不会抬高明天的上限，本月解开的 monthly 也不会带进下个月（升级后旧版本遗留的、没有周期维度的 daily/monthly 水位线会被丢弃，需要时重新执行一次 `unblock`）。
 
 `degradation` 按**模型名**映射到更便宜的模型，例如：
 
@@ -140,7 +142,9 @@ degradation:
 安全默认值：
 
 - `gateway.token` 为空时，只允许回环地址（`127.0.0.1` / `::1` / IPv4-mapped）访问
-- 配置 token 后，所有请求必须带 `Authorization: Bearer <token>`
+- 配置 token 后，除固定的客户端 bootstrap（只返回 `basePath` 和是否需要 token）外，所有 API 请求必须带 `Authorization: Bearer <token>`；面板首次打开会提示粘贴该 token，并保存在当前浏览器的 `localStorage`
+- 面板通过 `/_dsh-token-gateway/config` 发现挂载点；该响应不含花费、会话或凭据数据
+- token 会随 `Authorization` 头从浏览器发到 Host；远程访问请使用 HTTPS
 - 写操作只有 `unblock`，且同样是幂等水位线语义
 
 实测：
@@ -191,6 +195,7 @@ flowchart LR
 
 - DSH 的 `TokenUsage` 四个桶是**互斥**的：`inputTokens`（未缓存输入）、`cacheReadTokens`、`cacheWriteTokens`、`outputTokens`。每个桶只计一次价。
 - 内置价格表是 USD / 1M tokens 的**峰时快照**，口径为 2026-11 峰时价目；谷时乘以 `offPeakMultiplier`（默认 `0.5`）。上生产前请对照官方价目页，用 `pricing.prices` 覆盖。
+- `pricing.prices` 的条目会**与内置表按模型合并**：只写 `input` / `output` 时，`cacheRead` / `cacheWrite` 仍保留内置价，不会回退到 `input` 价。只为内置表里没有的模型写 override 时，缺失的 cache 桶才回退到该 override 的 `input`。
 - 内置表覆盖 `deepseek-chat`、`deepseek-reasoner`、`deepseek-flash`、`deepseek-v4-flash*`、`deepseek-v4-pro`。其余模型走 `defaultPrice`；默认 `priced: false`，计 0 并在日志里告警一次。
 - 归属精度：
   - `llm/stream` 的 `usage` 是权威来源
