@@ -141,11 +141,12 @@ degradation:
 
 安全默认值：
 
-- `gateway.token` 为空时，只允许回环地址（`127.0.0.1` / `::1` / IPv4-mapped）访问
-- 配置 token 后，除固定的客户端 bootstrap（只返回 `basePath` 和是否需要 token）外，所有 API 请求必须带 `Authorization: Bearer <token>`；面板首次打开会提示粘贴该 token，并保存在当前浏览器的 `localStorage`
+- `gateway.token` 为空时，只允许回环地址（`127.0.0.1` / `::1` / IPv4-mapped）访问，且 `Host` 必须是 `127.0.0.1` / `localhost` / `::1`（自定义主机名请设置 token）——这同时挡住 DNS rebinding
+- 配置 token 后，除固定的客户端 bootstrap（只返回 `basePath` 和是否需要 token）外，所有 API 请求必须带 `Authorization: Bearer <token>`（constant-time 比较）；面板首次打开会提示粘贴该 token，并保存在当前浏览器的 `localStorage`
 - 面板通过 `/_dsh-token-gateway/config` 发现挂载点；该响应不含花费、会话或凭据数据
 - token 会随 `Authorization` 头从浏览器发到 Host；远程访问请使用 HTTPS
-- 写操作只有 `unblock`，且同样是幂等水位线语义
+- 写操作只有 `unblock`，只接受 `application/json`，并拒绝跨站 `Origin` / `Sec-Fetch-Site`（简单表单 CSRF）
+- 反代 / 隧道场景必须设置 token：loopback 判断只看直连 socket，不会信任 `X-Forwarded-For`
 
 实测：
 

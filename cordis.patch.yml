@@ -59,7 +59,8 @@
         gateway:
           # Control API at /token-gateway/v1/* (GET reads + POST unblock), plus a
           # fixed /_dsh-token-gateway/config bootstrap for the in-composer panel.
-          http: true
+          # The only write (POST /v1/unblock) requires a JSON body and a
+          # same-origin browser request.          http: true
           basePath: /token-gateway
           # Set a bearer token before exposing the web host beyond loopback.
           # The panel asks for this token once and keeps it in the browser.

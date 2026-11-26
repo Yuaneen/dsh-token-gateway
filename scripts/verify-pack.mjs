@@ -300,7 +300,12 @@ try {
 
     const response = { status: 0, body: '', writeHead(status) { this.status = status; }, end(body) { this.body = String(body); } };
     await routes[0].handler(
-      { method: 'GET', url: '/token-gateway/v1/status?session=verify', headers: {}, socket: { remoteAddress: '127.0.0.1' } },
+      {
+        method: 'GET',
+        url: '/token-gateway/v1/status?session=verify',
+        headers: { host: '127.0.0.1:3080' },
+        socket: { remoteAddress: '127.0.0.1' },
+      },
       response,
     );
     const body = JSON.parse(response.body);
