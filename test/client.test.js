@@ -152,6 +152,13 @@ const findOne = (node, predicate) => findAll(node, predicate)[0];
 
 function loadBundle() {
   const captured = [];
+  const portals = [];
+  const reactDomShim = {
+    createPortal(node, container) {
+      portals.push({ node, container });
+      return node;
+    },
+  };
   /** Document listeners the widget registers, keyed by event type. */
   const listeners = {};
   const sandbox = {
@@ -164,6 +171,7 @@ function loadBundle() {
     },
     document: {
       visibilityState: 'visible',
+      body: {},
       head: { appendChild() {} },
       getElementById: () => null,
       createElement: () => ({ dataset: {}, style: {}, textContent: '' }),
@@ -177,7 +185,17 @@ function loadBundle() {
       },
     },
     navigator: { language: 'zh-CN' },
-    fetch: async () => ({ ok: true, json: async () => ({ data: null }) }),
+    fetch: async (url) => {
+      if (String(url) === '/_dsh-token-gateway/config') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { basePath: '/token-gateway', auth: 'none' } }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ data: null }) };
+    },
+    encodeURIComponent,
     setInterval: () => 0,
     clearInterval: () => {},
     setTimeout: () => 0,
@@ -198,9 +216,10 @@ function loadBundle() {
   const [definition] = captured;
   const module = definition.factory((id) => {
     if (id === 'react') return reactShim;
+    if (id === 'react-dom') return reactDomShim;
     throw new Error(`unexpected module-table request: ${id}`);
   });
-  return { definition, module, sandbox, listeners };
+  return { definition, module, sandbox, listeners, portals };
 }
 
 function fakeClientHost() {
@@ -233,15 +252,32 @@ function fakeClientHost() {
 
 /**
  * The bundle resolves `fetch` from its own realm (the vm sandbox), so the stub
- * has to replace the sandbox binding, not the host global.
+ * has to replace the sandbox binding, not the host global. Bootstrap is
+ * answered first; the stats call receives `payload`.
+ * @returns the recorded calls, so a test can assert the Session query or auth.
  */
 function withFetch(sandbox, payload, run) {
   const original = sandbox.fetch;
-  sandbox.fetch = async () => ({ ok: true, json: async () => ({ data: payload }) });
-  return Promise.resolve(run()).finally(() => {
+  const calls = [];
+  sandbox.fetch = async (url, init = {}) => {
+    const target = String(url);
+    calls.push({ url: target, headers: init.headers ?? {} });
+    if (target === '/_dsh-token-gateway/config') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { basePath: '/token-gateway', auth: 'none' } }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ data: payload }) };
+  };
+  return Promise.resolve(run(calls)).finally(() => {
     sandbox.fetch = original;
   });
 }
+
+/** Wait for the async bootstrap/stats chain to settle in the browser shim. */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 const SNAPSHOT = {
   generatedAt: '2026-11-25T12:00:00.000Z',
@@ -355,7 +391,7 @@ test('the unit toggle switches the chip between money and tokens', async () => {
 });
 
 test('clicking the chip opens the popover with the token mix', async () => {
-  const { module, sandbox } = loadBundle();
+  const { module, sandbox, portals } = loadBundle();
   const host = fakeClientHost();
   module.apply(host.ctx);
   const DockChip = host.state.slots[0].component;
@@ -369,6 +405,16 @@ test('clicking the chip opens the popover with the token mix', async () => {
     const expanded = view.rerender();
     const text = textOf(expanded).join(' ');
 
+    // The card leaves the dock's containing block: it must be portaled to the
+    // document body, not rendered as a fixed child of the composer.
+    assert.ok(
+      portals.some((entry) => entry.container === sandbox.document.body),
+      'the popover must portal to document.body',
+    );
+    assert.ok(
+      findOne(expanded, (node) => node.props?.className === 'tg-ring') !== undefined,
+      'the hero ring must render',
+    );
     assert.match(text, /生效限额/);
     assert.match(text, /token 构成/);
     assert.match(text, /缓存命中/);
@@ -396,12 +442,20 @@ test('a pointerdown inside the popover must not dismiss it', async () => {
       for (const fn of listeners.pointerdown ?? []) fn({ target });
     };
 
-    // Clicking a control inside the card: `closest` finds the widget wrapper.
-    fire({ closest: (selector) => (selector === '.tg-dock' ? { tag: 'div' } : null) });
+    // Clicking the chip's wrapper keeps the card open.
+    fire({ closest: (selector) => (selector.includes('.tg-dock') ? { tag: 'div' } : null) });
     let tree = view.rerender();
     assert.ok(
       findOne(tree, (node) => node.props?.className === 'tg-card') !== undefined,
-      'the popover must survive a click on its own controls',
+      'the popover must survive a click on the chip wrapper',
+    );
+
+    // The portaled card is outside .tg-dock, so containment must also accept it.
+    fire({ closest: (selector) => (selector.includes('.tg-card') ? { tag: 'div' } : null) });
+    tree = view.rerender();
+    assert.ok(
+      findOne(tree, (node) => node.props?.className === 'tg-card') !== undefined,
+      'the popover must survive a click on its own portaled controls',
     );
 
     // Clicking elsewhere still dismisses it.
@@ -431,6 +485,76 @@ test('an unreachable control plane degrades to a message, not a crash', async ()
     const view = await mount(DockChip, {});
     const text = textOf(view.tree).join(' ');
     assert.match(text, /控制面不可用/);
+    view.unmount();
+  } finally {
+    sandbox.fetch = original;
+  }
+});
+
+test('the chip scopes stats to the slot Session and the discovered basePath', async () => {
+  const { module, sandbox } = loadBundle();
+  const host = fakeClientHost();
+  module.apply(host.ctx);
+  const DockChip = host.state.slots[0].component;
+
+  await withFetch(sandbox, SNAPSHOT, async (calls) => {
+    const view = await mount(DockChip, { sessionId: 'session-x' });
+    assert.ok(
+      calls.some((call) => call.url === '/token-gateway/v1/stats?hours=24&session=session-x'),
+      'the stats request must carry the slot Session, not rely on lastSessionId',
+    );
+    view.unmount();
+  });
+});
+
+test('a protected control plane opens a token gate and retries with the token', async () => {
+  const { module, sandbox } = loadBundle();
+  const host = fakeClientHost();
+  module.apply(host.ctx);
+  const DockChip = host.state.slots[0].component;
+
+  const original = sandbox.fetch;
+  const calls = [];
+  sandbox.fetch = async (url, init = {}) => {
+    const target = String(url);
+    calls.push({ url: target, headers: init.headers ?? {} });
+    if (target === '/_dsh-token-gateway/config') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { basePath: '/token-gateway', auth: 'bearer' } }),
+      };
+    }
+    if (init.headers?.authorization === 'Bearer s3cret') {
+      return { ok: true, status: 200, json: async () => ({ data: SNAPSHOT }) };
+    }
+    return { ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) };
+  };
+
+  try {
+    const view = await mount(DockChip, { sessionId: 's1' });
+    assert.match(textOf(view.tree).join(' '), /需要访问令牌/);
+
+    findOne(view.tree, (node) => node.props?.className === 'tg-chip').props.onClick();
+    let tree = view.rerender();
+
+    const input = findOne(tree, (node) => node.props?.className === 'tg-token-input');
+    assert.ok(input !== undefined, 'the gate must render a token input');
+    input.props.onChange({ target: { value: 's3cret' } });
+    tree = view.rerender();
+
+    const save = findOne(tree, (node) => node.props?.className === 'tg-token-save');
+    assert.equal(save.props.disabled, false, 'a non-empty token enables Save');
+    save.props.onClick();
+    await tick();
+    await tick();
+
+    tree = view.rerender();
+    assert.match(textOf(tree).join(' '), /0\.360 CNY/);
+    assert.ok(
+      calls.some((call) => call.headers?.authorization === 'Bearer s3cret'),
+      'the retry must carry the pasted bearer token',
+    );
     view.unmount();
   } finally {
     sandbox.fetch = original;

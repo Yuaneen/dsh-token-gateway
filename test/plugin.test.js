@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { BOOTSTRAP_PATH } from '../src/gateway.js';
 import { apply } from '../src/index.js';
 
 function mockResponse() {
@@ -75,9 +76,11 @@ test('apply wires llm/stream, commands and the control API', async () => {
   assert.equal(host.commands.length, 1);
   assert.equal(host.commands[0].name, 'gateway');
 
-  assert.equal(host.routes.length, 1);
+  assert.equal(host.routes.length, 2);
   assert.equal(host.routes[0].kind, 'prefix');
   assert.equal(host.routes[0].path, '/token-gateway');
+  assert.equal(host.routes[1].kind, 'exact');
+  assert.equal(host.routes[1].path, BOOTSTRAP_PATH);
 });
 
 test('the /gateway command reports status and can unblock', async () => {
@@ -111,6 +114,34 @@ test('HTTP status is loopback-readable and JSON-shaped', async () => {
   assert.equal(body.ok, true);
   assert.equal(body.data.budgets.session, 2);
   assert.equal(body.data.action, 'allow');
+});
+
+test('the client bootstrap reports basePath and whether a token is required', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false }, gateway: { token: 's3cret' } });
+
+  const route = host.routes.find((entry) => entry.kind === 'exact');
+  assert.equal(route.path, BOOTSTRAP_PATH);
+
+  // The bootstrap is public: a remote browser must reach it before it has a
+  // token, and it exposes no spend, session or credential data.
+  const res = mockResponse();
+  await route.handler(mockRequest({ url: BOOTSTRAP_PATH, remoteAddress: '203.0.113.7' }), res);
+  assert.equal(res.out.status, 200);
+  assert.deepEqual(JSON.parse(res.out.body), {
+    ok: true,
+    data: { basePath: '/token-gateway', auth: 'bearer' },
+  });
+});
+
+test('the client bootstrap reports auth:none when no token is configured', async () => {
+  const host = createHost();
+  await apply(host.ctx, { persistence: { enabled: false } });
+
+  const route = host.routes.find((entry) => entry.kind === 'exact');
+  const res = mockResponse();
+  await route.handler(mockRequest({ url: BOOTSTRAP_PATH }), res);
+  assert.equal(JSON.parse(res.out.body).data.auth, 'none');
 });
 
 test('a configured token is required for every control request', async () => {
@@ -168,6 +199,6 @@ test('waits for bundle services that are absent at apply time', async () => {
 test('dispose flushes and removes host effects', async () => {
   const host = createHost();
   await apply(host.ctx, { persistence: { enabled: false } });
-  assert.equal(host.disposers.length, 2); // command + control API
+  assert.equal(host.disposers.length, 3); // command + control API + client bootstrap
   for (const dispose of host.disposers) dispose();
 });

@@ -70,6 +70,24 @@ test('price overrides win over the built-in table, keyed by model or provider/mo
   assert.equal(foo.output, 4);
 });
 
+test('a partial override keeps the built-in cache rates', () => {
+  const custom = {
+    ...pricing,
+    prices: { 'deepseek-v4-pro': { input: 2, output: 3 } },
+  };
+  const pro = priceForModel({ provider: 'deepseek-official', model: 'deepseek-v4-pro' }, custom, PEAK);
+  assert.equal(pro.input, 2);
+  assert.equal(pro.output, 3);
+  assert.equal(pro.cacheRead, 0.042, 'cached input must not fall back to the overridden input rate');
+  assert.equal(pro.cacheWrite, 1.25);
+
+  // A model with no built-in entry still gets the documented fallback: the
+  // cache buckets use the override's input rate.
+  const foo = priceForModel({ provider: 'other', model: 'foo' }, { ...custom, prices: { foo: { input: 3, output: 4 } } }, PEAK);
+  assert.equal(foo.cacheRead, 3);
+  assert.equal(foo.cacheWrite, 3);
+});
+
 test('unknown models are unpriced and contribute zero', () => {
   const price = priceForModel({ provider: 'custom', model: 'mystery' }, pricing, PEAK);
   assert.equal(price.priced, false);

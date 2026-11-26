@@ -182,41 +182,68 @@ export class Ledger {
     return out;
   }
 
-  /** Lift a hard block until spending grows past the current watermark. */
-  setOverride(scope, spent, sessionId = '__global__') {
-    this.overrides.set(this.overrideKey(scope, sessionId), spent);
+  /**
+   * Lift a hard block until spending grows past the current watermark.
+   * A daily or monthly watermark belongs to that period only: the next day or
+   * month starts with no watermark, so a lift never raises a later cap.
+   */
+  setOverride(scope, spent, sessionId = '__global__', at = Date.now()) {
+    const key = this.overrideKey(scope, sessionId, at);
+    this.overrides.set(key, spent);
+    this.prunePeriods(this.overrides, scope, key);
   }
 
   /** Lift a token-cap block; `unblock` sets both watermarks for a scope. */
-  setTokenOverride(scope, tokens, sessionId = '__global__') {
-    this.tokenOverrides.set(this.overrideKey(scope, sessionId), tokens);
+  setTokenOverride(scope, tokens, sessionId = '__global__', at = Date.now()) {
+    const key = this.overrideKey(scope, sessionId, at);
+    this.tokenOverrides.set(key, tokens);
+    this.prunePeriods(this.tokenOverrides, scope, key);
   }
 
-  clearOverride(scope, sessionId = '__global__') {
-    this.overrides.delete(this.overrideKey(scope, sessionId));
-    this.tokenOverrides.delete(this.overrideKey(scope, sessionId));
+  /**
+   * Drop watermarks from earlier billing periods of the same global scope. A
+   * new daily/monthly lift is the only live one; keeping old periods would grow
+   * the snapshot forever without ever being read again.
+   */
+  prunePeriods(map, scope, keepKey) {
+    if (scope === 'session') return;
+    const prefix = `${scope}:`;
+    for (const key of map.keys()) {
+      if (key !== keepKey && key.startsWith(prefix)) map.delete(key);
+    }
   }
 
-  /** Session-scoped overrides are keyed by session; day/month stay global. */
-  overrideKey(scope, sessionId) {
-    return scope === 'session' ? `session:${String(sessionId || '__global__')}` : scope;
+  clearOverride(scope, sessionId = '__global__', at = Date.now()) {
+    this.overrides.delete(this.overrideKey(scope, sessionId, at));
+    this.tokenOverrides.delete(this.overrideKey(scope, sessionId, at));
   }
 
-  /** The override values policy.js expects, resolved for one session. */
-  getOverrides(sessionId) {
+  /**
+   * Session-scoped overrides are keyed by session; day/month by their billing
+   * period. Keying by period is what makes `spent <= watermark` meaningful: a
+   * watermark recorded yesterday must not lift today's cap.
+   */
+  overrideKey(scope, sessionId, at = Date.now()) {
+    if (scope === 'session') return `session:${String(sessionId || '__global__')}`;
+    const period = scope === 'daily' ? dayKey(at, this.timeZone) : monthKey(at, this.timeZone);
+    return `${scope}:${period}`;
+  }
+
+  /** The override values policy.js expects, resolved for one session at `at`. */
+  getOverrides(sessionId, at = Date.now()) {
     const out = {};
     for (const scope of ['session', 'daily', 'monthly']) {
-      const value = this.overrides.get(this.overrideKey(scope, sessionId));
+      const value = this.overrides.get(this.overrideKey(scope, sessionId, at));
       if (typeof value === 'number') out[scope] = value;
     }
     return out;
   }
 
   /** Token watermarks for the same scopes (see `tokenTotals`). */
-  getTokenOverrides(sessionId) {
+  getTokenOverrides(sessionId, at = Date.now()) {
     const out = {};
     for (const scope of ['session', 'daily', 'monthly']) {
-      const value = this.tokenOverrides.get(this.overrideKey(scope, sessionId));
+      const value = this.tokenOverrides.get(this.overrideKey(scope, sessionId, at));
       if (typeof value === 'number') out[scope] = value;
     }
     return out;
@@ -241,7 +268,7 @@ export class Ledger {
   serialize() {
     const dump = (map) => Object.fromEntries([...map.entries()].map(([key, value]) => [key, { ...value }]));
     return {
-      version: 2,
+      version: 3,
       timeZone: this.timeZone,
       sessions: dump(this.sessions),
       days: dump(this.days),
@@ -275,8 +302,12 @@ export class Ledger {
     load(this.models, state.models);
     const loadOverrides = (map, source) => {
       if (source === null || typeof source !== 'object') return;
-      for (const [scope, value] of Object.entries(source)) {
-        if (typeof value === 'number' && Number.isFinite(value)) map.set(scope, value);
+      for (const [key, value] of Object.entries(source)) {
+        // Versions 2 and earlier stored `daily`/`monthly` without a billing
+        // period. That watermark cannot be interpreted for any particular day,
+        // so it is dropped instead of silently lifting a later period's cap.
+        if (key === 'daily' || key === 'monthly') continue;
+        if (typeof value === 'number' && Number.isFinite(value)) map.set(key, value);
       }
     };
     loadOverrides(this.overrides, state.overrides);

@@ -48,28 +48,72 @@ test('sessions are isolated but share daily and monthly totals', () => {
 
 test('overrides are session-scoped for session, global for day/month', () => {
   const ledger = new Ledger({ timeZone: ZONE });
-  ledger.setOverride('session', 1.25, 's1');
+  ledger.setOverride('session', 1.25, 's1', T);
   assert.equal(ledger.overrides.get('session:s1'), 1.25);
-  assert.deepEqual(ledger.getOverrides('s1'), { session: 1.25 });
-  assert.deepEqual(ledger.getOverrides('s2'), {});
+  assert.deepEqual(ledger.getOverrides('s1', T), { session: 1.25 });
+  assert.deepEqual(ledger.getOverrides('s2', T), {});
 
-  ledger.setOverride('daily', 0.5, 's1');
-  assert.deepEqual(ledger.getOverrides('s2'), { daily: 0.5 });
+  ledger.setOverride('daily', 0.5, 's1', T);
+  assert.deepEqual(ledger.getOverrides('s2', T), { daily: 0.5 });
 
-  ledger.clearOverride('session', 's1');
+  ledger.clearOverride('session', 's1', T);
   assert.equal(ledger.overrides.has('session:s1'), false);
+});
+
+test('daily and monthly watermarks belong to their billing period', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const nextDay = Date.parse('2026-11-17T10:00:00+08:00');
+  const nextMonth = Date.parse('2026-12-01T10:00:00+08:00');
+  ledger.setOverride('daily', 12, 's1', T);
+  ledger.setOverride('monthly', 12, 's1', T);
+  ledger.setTokenOverride('daily', 1_200, 's1', T);
+
+  assert.deepEqual(ledger.getOverrides('s1', T), { daily: 12, monthly: 12 });
+  assert.deepEqual(ledger.getOverrides('s1', nextDay), { monthly: 12 });
+  assert.deepEqual(ledger.getOverrides('s1', nextMonth), {});
+  assert.deepEqual(ledger.getTokenOverrides('s1', T), { daily: 1_200 });
+  assert.deepEqual(ledger.getTokenOverrides('s1', nextDay), {});
+});
+
+test('a new period watermark replaces the previous period', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  const nextDay = Date.parse('2026-11-17T10:00:00+08:00');
+
+  ledger.setOverride('daily', 5, 's1', T);
+  ledger.setOverride('daily', 6, 's1', nextDay);
+  assert.equal(ledger.overrides.has('daily:2026-11-16'), false);
+  assert.deepEqual(ledger.getOverrides('s1', T), {});
+  assert.deepEqual(ledger.getOverrides('s1', nextDay), { daily: 6 });
+
+  ledger.setTokenOverride('monthly', 100, 's1', T);
+  ledger.setTokenOverride('monthly', 200, 's1', Date.parse('2026-12-02T10:00:00+08:00'));
+  assert.equal(ledger.tokenOverrides.has('monthly:2026-11'), false);
+  assert.deepEqual(ledger.getTokenOverrides('s1', Date.parse('2026-12-02T10:00:00+08:00')), { monthly: 200 });
 });
 
 test('serialize/restore round-trips all buckets', () => {
   const ledger = new Ledger({ timeZone: ZONE });
   ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: usage(10, 20), costUsd: 0.5, at: T });
-  ledger.setOverride('daily', 0.5);
+  ledger.setOverride('daily', 0.5, '__global__', T);
 
   const restored = new Ledger({ timeZone: ZONE });
   assert.equal(restored.restore(ledger.serialize()), true);
   assert.deepEqual(restored.totals('s1', T), ledger.totals('s1', T));
   assert.equal(restored.modelBreakdown()[0].tokens, 30);
-  assert.equal(restored.overrides.get('daily'), 0.5);
+  assert.equal(restored.getOverrides('__global__', T).daily, 0.5);
+});
+
+test('restore drops period-less legacy watermarks', () => {
+  const ledger = new Ledger({ timeZone: ZONE });
+  ledger.restore({
+    version: 2,
+    overrides: { daily: 12, monthly: 20, 'session:s1': 3 },
+    tokenOverrides: { daily: 1_200 },
+  });
+  // A watermark written before period keys existed cannot be attributed to a
+  // day/month, so only the session watermark survives.
+  assert.deepEqual(ledger.getOverrides('s1', T), { session: 3 });
+  assert.deepEqual(ledger.getTokenOverrides('s1', T), {});
 });
 
 test('restore ignores corrupt buckets instead of throwing', () => {
@@ -123,11 +167,11 @@ test('allTime sums every month bucket', () => {
 test('serialize/restore round-trips hours and token watermarks', () => {
   const ledger = new Ledger({ timeZone: ZONE });
   ledger.record({ sessionId: 's1', provider: 'p', model: 'm', usage: usage(1_000, 100), costUsd: 0.01, at: T });
-  ledger.setTokenOverride('session', 1_100, 's1');
+  ledger.setTokenOverride('session', 1_100, 's1', T);
 
   const restored = new Ledger({ timeZone: ZONE });
   assert.equal(restored.restore(ledger.serialize()), true);
-  assert.deepEqual(restored.getTokenOverrides('s1'), { session: 1_100 });
+  assert.deepEqual(restored.getTokenOverrides('s1', T), { session: 1_100 });
   assert.equal(restored.series({ at: T, hours: 1 })[0].totalTokens, 1_100);
 });
 

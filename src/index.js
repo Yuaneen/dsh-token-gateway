@@ -12,7 +12,7 @@
  */
 
 import { resolveConfig } from './config.js';
-import { createGateway } from './gateway.js';
+import { BOOTSTRAP_PATH, createGateway } from './gateway.js';
 import { Ledger } from './ledger.js';
 import { createStore } from './store.js';
 
@@ -44,6 +44,24 @@ function registerRoute(scope, server, gateway, config) {
       }),
     'token-gateway: control API',
   );
+}
+
+function registerBootstrap(scope, server, gateway) {
+  scope.effect(
+    () =>
+      server.register({
+        kind: 'exact',
+        path: BOOTSTRAP_PATH,
+        handler: (req, res) => gateway.handleBootstrap(req, res),
+      }),
+    'token-gateway: client bootstrap',
+  );
+}
+
+/** The control API and its fixed-path bootstrap mount together. */
+function registerHttp(scope, server, gateway, config) {
+  registerRoute(scope, server, gateway, config);
+  registerBootstrap(scope, server, gateway);
 }
 
 export async function apply(ctx, input) {
@@ -87,11 +105,11 @@ export async function apply(ctx, input) {
   if (config.gateway.http) {
     const webServer = ctx.get('webServer');
     if (webServer !== undefined) {
-      registerRoute(ctx, webServer, gateway, config);
+      registerHttp(ctx, webServer, gateway, config);
     } else if (typeof ctx.inject === 'function') {
       ctx.inject(['webServer'], (scope) => {
         const server = scope.get('webServer');
-        if (server !== undefined) registerRoute(scope, server, gateway, config);
+        if (server !== undefined) registerHttp(scope, server, gateway, config);
       });
     }
   }
