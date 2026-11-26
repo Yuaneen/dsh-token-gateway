@@ -201,7 +201,7 @@ flowchart LR
 - 内置表覆盖 `deepseek-chat`、`deepseek-reasoner`、`deepseek-flash`、`deepseek-v4-flash*`、`deepseek-v4-pro`。其余模型走 `defaultPrice`；默认 `priced: false`，计 0 并在日志里告警一次。
 - 归属精度：
   - `llm/stream` 的 `usage` 是权威来源
-  - 带 `sessionId` 的调用记到该会话
+  - 带 `sessionId` 的调用记到该会话所属的根会话（subagent 归到发起它的根会话）
   - 不带 `sessionId` 的辅助调用（标题 / 压缩）回退到最近活跃会话，再回退到 `__global__`；子代理会话不会抢走这个回退归属
   - 重试的每次尝试各自计量（provider 实际计费）
 

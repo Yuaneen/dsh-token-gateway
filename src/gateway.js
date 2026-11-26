@@ -211,9 +211,15 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
    */
   function onSessionEvent(session) {
     if (session?.id === undefined) return;
-    const depth = session.delegationDepth;
-    if (typeof depth === 'number' && depth > 0) return;
-    state.lastSessionId = String(session.id);
+    const id = String(session.id);
+    const header = session.header ?? {};
+    const depth = header.delegationDepth;
+    const delegated = header.origin === 'subagent' || (typeof depth === 'number' && depth > 0);
+    if (delegated) {
+      if (header.parentSession !== undefined) ledger.setSessionRoot(id, header.parentSession);
+      return;
+    }
+    state.lastSessionId = id;
   }
 
   /**
@@ -241,7 +247,7 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
     });
     return {
       generatedAt: new Date(at).toISOString(),
-      sessionId,
+      sessionId: ledger.rootOf(sessionId),
       currency: config.currency,
       budgets: config.budgets,
       tokenBudgets: config.tokenBudgets,
@@ -317,7 +323,7 @@ export function createGateway({ config, ledger, llm, logger, now = () => Date.no
         sendJson(res, 200, {
           ok: true,
           data: {
-            sessionId: id,
+            sessionId: ledger.rootOf(id),
             generatedAt: new Date(at).toISOString(),
             totals: ledger.totals(id, at),
             tokenTotals: ledger.tokenTotals(id, at),
